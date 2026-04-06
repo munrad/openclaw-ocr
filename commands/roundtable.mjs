@@ -6,6 +6,7 @@ import { redis, redisRaw, parseJson, parseHgetall, parseXread, withLock } from '
 import { KEYS, genRoundtableId, now } from '../lib/schema.mjs';
 import { output, argError } from '../lib/errors.mjs';
 import { validateAgentId } from '../lib/known-agents.mjs';
+import { resolveCoordinatorBindings } from '../lib/coordinator-bindings.mjs';
 import { ROUNDTABLE_TEMPLATES } from '../lib/roundtable-templates.mjs';
 import { saveRoundtableHistory } from '../lib/roundtable-history.mjs';
 import { ensureTaskStatusTracker, ensureBootstrappedAgentStatus } from './task-status.mjs';
@@ -57,6 +58,8 @@ function tryAutoCompleteRoundtable(rtId, rtKey = KEYS.roundtable(rtId), streamKe
 
 export async function cmdRoundtableCreate(args) {
   let topic = null, participants = null, context = null, constraints = null, template = null;
+  let topicId = null, chatId = null;
+  const bindingOpts = {};
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--topic' && args[i + 1])            { topic = args[i + 1]; i++; }
@@ -64,7 +67,14 @@ export async function cmdRoundtableCreate(args) {
     else if (args[i] === '--context' && args[i + 1])     { context = args[i + 1]; i++; }
     else if (args[i] === '--constraints' && args[i + 1]) { constraints = args[i + 1]; i++; }
     else if (args[i] === '--template' && args[i + 1])    { template = args[i + 1]; i++; }
+    else if (args[i] === '--topic-id' && args[i + 1])    { topicId = args[i + 1]; i++; }
+    else if (args[i] === '--chat-id' && args[i + 1])     { chatId = args[i + 1]; i++; }
+    else if (args[i] === '--coordinator-id' && args[i + 1]) { bindingOpts.coordinator_id = args[i + 1]; i++; }
+    else if (args[i] === '--owner-id' && args[i + 1])    { bindingOpts.owner_id = args[i + 1]; i++; }
+    else if (args[i] === '--close-owner-id' && args[i + 1]) { bindingOpts.close_owner_id = args[i + 1]; i++; }
+    else if (args[i] === '--creator-id' && args[i + 1])  { bindingOpts.creator_id = args[i + 1]; i++; }
   }
+  const bindings = resolveCoordinatorBindings(bindingOpts);
 
   // Resolve template first (may provide topic default)
   if (template) {
@@ -127,12 +137,15 @@ export async function cmdRoundtableCreate(args) {
   // Auto-create task-status tracker for roundtable visibility
   let trackerResult = null;
   try {
-    const topicId = args.find((a, i) => args[i - 1] === '--topic-id') || '1';
     trackerResult = await ensureTaskStatusTracker(rtId, {
       title: `🏛️ RT: ${topic}`,
-      topic_id: topicId,
+      topic_id: topicId || '1',
+      chat_id: chatId,
       run_id: rtId,
-      coordinator_id: 'nerey',
+      coordinator_id: bindings.coordinator_id,
+      owner_id: bindings.owner_id,
+      close_owner_id: bindings.close_owner_id,
+      creator_id: bindings.creator_id,
       agent_id: participantList[0],
     });
     // Bootstrap statuses for all roundtable participants

@@ -5,6 +5,7 @@ Use OCR as a backend coordination layer, not as the main orchestrator.
 ## Ownership
 
 - Coordinator-only commands:
+  - `ocr orchestrate-fanout`
   - `ocr task-status-create`
   - `ocr task-status-update`
   - `ocr task-status-close`
@@ -16,17 +17,19 @@ Use OCR as a backend coordination layer, not as the main orchestrator.
 ## Required identifiers
 
 - `task_id`: stable coordinator task identifier
+- `openclaw:orchestration:<task_id>`: durable root orchestration record in Redis
 - `parent_run_id`: coordinator run that owns child fan-out
 - `run_id`: child run identifier for a worker
 - `coordinator_id`: actor allowed to own the tracker
 
 ## Recommended write pattern
 
-1. Coordinator creates `task_id`.
-2. Coordinator creates tracker once.
-3. Each child writes only its own `agent_status`.
-4. Coordinator aggregates child statuses into one user-facing summary.
-5. Watcher may refresh Telegram, but orchestration decisions come from the coordinator state.
+1. Coordinator creates `task_id` and local execution state.
+2. Coordinator may materialize child tasks via `ocr orchestrate-fanout`.
+3. Coordinator creates tracker once when chat projection is needed.
+4. Each child writes only its own `agent_status`.
+5. Coordinator aggregates child statuses into one user-facing summary.
+6. Watcher may refresh Telegram, but orchestration decisions come from the coordinator state.
 
 ## Delivery semantics
 
@@ -41,3 +44,4 @@ Use OCR as a backend coordination layer, not as the main orchestrator.
 - Redis stream is the durable signal source.
 - Reconcile stale child runs before accepting late writes.
 - Never let a child update another child’s tracker membership or terminal status.
+- Treat `OPENCLAW_COORDINATOR_ID` only as a default binding source, not as a substitute for canonical coordinator state.

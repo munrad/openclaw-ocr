@@ -22,6 +22,7 @@ import { KEYS } from '../lib/schema.mjs';
 import { output, argError } from '../lib/errors.mjs';
 import { writeAgentStatus } from '../lib/status-reconcile.mjs';
 import { classifyTelegramFailure, planTaskStatusSync, taskStatusSignature } from '../lib/task-status-sync.mjs';
+import { resolveCoordinatorBindings } from '../lib/coordinator-bindings.mjs';
 import {
   getDefaultTelegramChatId,
   getDefaultTelegramTopicId,
@@ -313,9 +314,12 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
   const normalizedTitle = String(
     input.title || input.label || input.task_title || input.task || normalizedTaskId,
   ).trim() || normalizedTaskId;
-  const normalizedCoordinatorId = String(
-    input.coordinator_id || input.owner_id || input.creator_id || normalizedAgentId || 'system',
-  ).trim() || 'system';
+  const bindings = resolveCoordinatorBindings({
+    coordinator_id: input.coordinator_id || input.owner_id || input.creator_id || normalizedAgentId || 'system',
+    owner_id: input.owner_id,
+    close_owner_id: input.close_owner_id,
+    creator_id: input.creator_id,
+  });
 
   ensureBootstrappedAgentStatus(normalizedAgentId, {
     task_id: normalizedTaskId,
@@ -383,10 +387,10 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
     topic_id: existing.topic_id || normalizedTopicId,
     chat_id: effectiveChatId,
     run_id: existing.run_id || normalizedRunId,
-    coordinator_id: existing.coordinator_id || normalizedCoordinatorId,
-    owner_id: existing.owner_id || normalizedCoordinatorId,
-    close_owner_id: existing.close_owner_id || normalizedCoordinatorId,
-    creator_id: existing.creator_id || normalizedCoordinatorId,
+    coordinator_id: existing.coordinator_id || bindings.coordinator_id,
+    owner_id: existing.owner_id || bindings.owner_id,
+    close_owner_id: existing.close_owner_id || bindings.close_owner_id,
+    creator_id: existing.creator_id || bindings.creator_id,
   });
 
   if (created.ok) {
@@ -410,10 +414,10 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
       topic_id: normalizedTopicId,
       chat_id: effectiveChatId,
       run_id: normalizedRunId,
-      coordinator_id: normalizedCoordinatorId,
-      owner_id: normalizedCoordinatorId,
-      close_owner_id: normalizedCoordinatorId,
-      creator_id: normalizedCoordinatorId,
+      coordinator_id: bindings.coordinator_id,
+      owner_id: bindings.owner_id,
+      close_owner_id: bindings.close_owner_id,
+      creator_id: bindings.creator_id,
     })),
     title: existing.title || normalizedTitle,
     run_id: existing.run_id || normalizedRunId,
@@ -441,14 +445,11 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
 
 // ─── Task Payload ────────────────────────────────────────────────────────────
 
-function createTaskPayload(taskId, input = {}) {
+export function createTaskPayload(taskId, input = {}) {
   const topicId = resolveTaskStatusTopicId(input);
   const chatId = resolveTaskStatusChatId(input);
   const runId = String(input.run_id || taskId);
-  const coordinatorId = String(input.coordinator_id || '').trim();
-  const ownerId = String(input.owner_id || coordinatorId || '').trim();
-  const closeOwnerId = String(input.close_owner_id || ownerId || coordinatorId || '').trim();
-  const creatorId = String(input.creator_id || coordinatorId || '').trim();
+  const bindings = resolveCoordinatorBindings(input);
   return {
     task_id: String(taskId),
     run_id: runId,
@@ -457,10 +458,10 @@ function createTaskPayload(taskId, input = {}) {
     topic_id: topicId,
     chat_id: chatId,
     status: 'running',
-    coordinator_id: coordinatorId,
-    owner_id: ownerId,
-    close_owner_id: closeOwnerId,
-    creator_id: creatorId,
+    coordinator_id: bindings.coordinator_id,
+    owner_id: bindings.owner_id,
+    close_owner_id: bindings.close_owner_id,
+    creator_id: bindings.creator_id,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     status_owner: 'coordinator',
@@ -686,16 +687,13 @@ export async function cmdTaskStatusCreate(args) {
   const agentsStr = opts.agents;
   const chatId = resolveTaskStatusChatId(opts);
   const runId = opts.run_id || taskId;
-  const coordinatorId = opts.coordinator_id || opts.coordinator;
-  const ownerId = opts.owner_id || opts.owner || coordinatorId;
-  const closeOwnerId = opts.close_owner_id || opts.close_owner || ownerId;
-  const creatorId = opts.creator_id || opts.creator || coordinatorId;
+  const bindings = resolveCoordinatorBindings(opts);
 
   if (!taskId) throw argError('task-status-create requires --task-id');
   if (!topicId) throw argError('task-status-create requires --topic-id');
   if (!title) throw argError('task-status-create requires --title');
   if (!agentsStr) throw argError('task-status-create requires --agents');
-  if (!coordinatorId) throw argError('task-status-create requires --coordinator-id');
+  if (!String(opts.coordinator_id || opts.coordinator || '').trim()) throw argError('task-status-create requires --coordinator-id');
   if (!getTelegramToken()) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
 
   const agents = uniqueAgents(agentsStr.split(','));
@@ -707,10 +705,10 @@ export async function cmdTaskStatusCreate(args) {
     topic_id: topicId,
     chat_id: chatId,
     run_id: runId,
-    coordinator_id: coordinatorId,
-    owner_id: ownerId,
-    close_owner_id: closeOwnerId,
-    creator_id: creatorId,
+    coordinator_id: bindings.coordinator_id,
+    owner_id: bindings.owner_id,
+    close_owner_id: bindings.close_owner_id,
+    creator_id: bindings.creator_id,
   });
 
   if (!result.ok) {
@@ -724,10 +722,10 @@ export async function cmdTaskStatusCreate(args) {
     message_id: result.message_id,
     topic_id: result.task?.topic_id || topicId,
     chat_id: result.task?.chat_id || chatId,
-    coordinator_id: result.task?.coordinator_id || coordinatorId,
-    owner_id: result.task?.owner_id || ownerId,
-    close_owner_id: result.task?.close_owner_id || closeOwnerId,
-    creator_id: result.task?.creator_id || creatorId,
+    coordinator_id: result.task?.coordinator_id || bindings.coordinator_id,
+    owner_id: result.task?.owner_id || bindings.owner_id,
+    close_owner_id: result.task?.close_owner_id || bindings.close_owner_id,
+    creator_id: result.task?.creator_id || bindings.creator_id,
     delivery_state: result.task?.delivery_state || 'confirmed',
     idempotent: result.idempotent || false,
   });

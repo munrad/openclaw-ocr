@@ -19,6 +19,7 @@ import { withRetry } from '../lib/retry.mjs';
 import { redis, redisRaw, parseJson, parseHgetall, withLock } from '../lib/redis.mjs';
 import { KEYS, genPipelineId, now } from '../lib/schema.mjs';
 import { output, argError } from '../lib/errors.mjs';
+import { resolveCoordinatorBindings } from '../lib/coordinator-bindings.mjs';
 import { ensureTaskStatusTracker } from './task-status.mjs';
 
 // ─── Pipeline Templates ──────────────────────────────────────────────────────
@@ -112,6 +113,12 @@ export async function cmdStartPipeline(args) {
   if (p.context && context === null) {
     throw argError('start-pipeline: invalid JSON in --context');
   }
+  const bindings = resolveCoordinatorBindings({
+    coordinator_id: p['coordinator-id'] || p.coordinator_id || p.coordinator,
+    owner_id: p['owner-id'] || p.owner_id || p.owner,
+    close_owner_id: p['close-owner-id'] || p.close_owner_id || p.close_owner,
+    creator_id: p['creator-id'] || p.creator_id || p.creator,
+  });
 
   // Enforce maxConcurrent pipelines
   const MAX_CONCURRENT_PIPELINES = 20;
@@ -193,8 +200,12 @@ export async function cmdStartPipeline(args) {
     trackerResult = await ensureTaskStatusTracker(p['task-id'], {
       title,
       topic_id: topicId,
+      chat_id: p['chat-id'] || p.chat_id,
       run_id: p['task-id'],
-      coordinator_id: 'nerey',
+      coordinator_id: bindings.coordinator_id,
+      owner_id: bindings.owner_id,
+      close_owner_id: bindings.close_owner_id,
+      creator_id: bindings.creator_id,
       agent_id: template.steps[0],
     });
     // Bootstrap statuses for all pipeline agents

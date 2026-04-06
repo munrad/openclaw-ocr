@@ -36,6 +36,7 @@ import { cmdBugReport, cmdBugList, cmdBugFix, cmdBugWontfix, cmdBugAssign, cmdBu
 import { cmdGc } from './commands/gc.mjs';
 import { cmdLifecycleRun, cmdLifecycleStart, cmdLifecycleStop, cmdLifecycleUpdate, cmdLifecycleBeat, cmdLifecycleList } from './commands/lifecycle.mjs';
 import { cmdCostLog, cmdCostReport } from './commands/costs.mjs';
+import { cmdOrchestrateFanout } from './commands/orchestrator.mjs';
 
 // ─── Command Registry ────────────────────────────────────────────────────────
 
@@ -101,6 +102,7 @@ const COMMANDS = {
   // Cost tracking:
   'cost-log':              (a) => cmdCostLog(a),
   'cost-report':           (a) => cmdCostReport(a),
+  'orchestrate-fanout':    (a) => cmdOrchestrateFanout(a),
 
   // Agent Lifecycle (automated heartbeat + status management):
   'lifecycle': async (a) => {
@@ -205,7 +207,7 @@ function printHelp() {
     '  dashboard                           — unified system status (agents, tasks, insights, messages)',
     '',
     'Roundtable (multi-agent deliberation):',
-    '  roundtable-create --topic <text> {--participants <csv> | --template <name>} [--context <text>] [--constraints <text>]',
+    '  roundtable-create --topic <text> {--participants <csv> | --template <name>} [--context <text>] [--constraints <text>] [--topic-id <id>] [--chat-id <id>] [--coordinator-id <id>]',
     '  roundtable-contribute <rt_id> --agent <id> --round <N> --summary <text> [--findings <text>] [--recommendations <text>] [--agrees_with <text>] [--disagrees_with <text>] [--questions <text>]',
     '  roundtable-read <rt_id> [--round <N>]',
     '  roundtable-synthesize <rt_id> --synthesis <text>',
@@ -224,8 +226,12 @@ function printHelp() {
     '  route-task <json>                            — route task to agent+pipeline by keywords/type',
     '    Input: {"text":"...","source":"telegram","metadata":{"type":"feature"}}',
     '',
+    'Coordinator Runtime:',
+    '  orchestrate-fanout --spec <json>             — coordinator-owned fan-out into parallel child tasks',
+    '  orchestrate-fanout --goal <text> --agents coder,tester --coordinator-id <id> [--title <text>] [--topic-id <id>] [--chat-id <id>] [--create-tracker true|false]',
+    '',
     'Pipelines (multi-step orchestration):',
-    '  start-pipeline --task-id <id> --template <name> [--context <json>]',
+    '  start-pipeline --task-id <id> --template <name> [--context <json>] [--topic-id <id>] [--chat-id <id>] [--coordinator-id <id>]',
     '  advance-pipeline --pipeline-id <id> --result <json>',
     '  get-pipeline --pipeline-id <id>',
     '  list-pipelines [--status active|completed|escalated] [--limit N]',

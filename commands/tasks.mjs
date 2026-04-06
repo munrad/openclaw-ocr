@@ -21,10 +21,7 @@ export async function cmdInit() {
   output({ ok: true, message: 'Consumer groups initialized', groups: Object.values(GROUPS) });
 }
 
-export async function cmdPushTask(jsonArg) {
-  if (!jsonArg) throw argError('push-task requires <json>');
-  const payload = parseJson(jsonArg);
-  if (!payload) throw argError('push-task: invalid JSON');
+export async function pushTaskPayload(payload) {
   if (!payload.type) payload.type = 'general';
 
   const taskId = genTaskId();
@@ -60,6 +57,16 @@ export async function cmdPushTask(jsonArg) {
     }
     return true;
   });
+
+  return taskId;
+}
+
+export async function cmdPushTask(jsonArg) {
+  if (!jsonArg) throw argError('push-task requires <json>');
+  const payload = parseJson(jsonArg);
+  if (!payload) throw argError('push-task: invalid JSON');
+
+  const taskId = await pushTaskPayload(payload);
 
   output({ ok: true, task_id: taskId });
 }

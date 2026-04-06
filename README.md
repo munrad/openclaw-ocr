@@ -36,6 +36,12 @@ npm install -g .
 ocr --help
 ```
 
+## Runtime Env
+
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`
+- `OPENCLAW_TELEGRAM_BOT_TOKEN`, `OPENCLAW_TELEGRAM_CHAT_ID`, `OPENCLAW_TELEGRAM_TOPIC_ID`
+- `OPENCLAW_COORDINATOR_ID` for a default coordinator/ownership binding when a coordinator command does not pass `--coordinator-id`
+
 ## Install The Coordinator Skill
 
 Initial bootstrap from this repository:
@@ -77,3 +83,37 @@ node scripts/run-redis-tests-sequential.mjs
 
 The runner assigns a separate `REDIS_DB` to each test file, runs them sequentially,
 checks Redis hygiene on the same DB, and flushes that DB after each file.
+
+## Coordinator Runtime
+
+OCR now includes a coordinator-owned fan-out command for the skill/runtime layer:
+
+```bash
+ocr orchestrate-fanout \
+  --goal "Fix the parser bug and verify the patch" \
+  --agents coder,tester \
+  --coordinator-id teamlead \
+  --title "Parser bug hotfix"
+```
+
+This creates a root orchestration record, fans out child tasks with shared
+`run_id` / `parent_run_id` metadata, and can optionally create one
+coordinator-owned task-status tracker for the whole task.
+
+Enable the tracker explicitly with `--create-tracker true`, or pass explicit
+chat/topic runtime inputs through the command/spec.
+
+## End-To-End Flow
+
+1. Install or refresh the skill with `node scripts/install-openclaw-orchestrator.mjs`.
+2. Keep the canonical plan and live state in the coordinator skill, not in Redis.
+3. Materialize the fan-out with `ocr orchestrate-fanout` once the decomposition is concrete.
+4. Let child agents write only `ocr lifecycle ...`, `ocr set-status ...`, and `ocr emit ...`.
+5. Let the coordinator aggregate child progress and own all `task-status-*` writes.
+6. Close the tracker from the coordinator path when the user-visible task is done.
+
+## Current Limits
+
+- `ocr orchestrate-fanout` is a materializer for a ready plan, not a full adaptive planner.
+- OCR is production-usable as a coordination backend and coordinator helper, but automatic decomposition/fan-out policy still lives above it in the skill/runtime layer.
+- Telegram degraded modes (`pending`, `unconfirmed`, `suppressed`) are supported, but real bot/topic verification should still be done in the target staging or production environment.

@@ -21,12 +21,22 @@ Use this skill when the main agent is the coordinator and OCR is the backend tra
    `task_id`, `goal`, `plan`, `child_runs[]`, `phase`, `summary`, `progress`, `errors[]`.
 2. Decide whether the task should fan out. Prefer parallel child agents only for independent subtasks.
 3. If chat projection is needed, create a tracker once with `ocr task-status-create`.
-4. Spawn child agents. Give each child:
+   When you already have a concrete decomposition, prefer `ocr orchestrate-fanout`
+   to materialize the child tasks and shared run metadata in one step.
+4. Use `ocr start-pipeline` or `ocr roundtable-create` only when the workflow is already pipeline/roundtable-shaped; otherwise keep the plan local and use `ocr orchestrate-fanout`.
+5. Spawn child agents. Give each child:
    `child_run_id`, `parent_run_id`, `acceptance_criteria`, and one narrow responsibility.
-5. Require children to emit only lifecycle/status events:
+6. Require children to emit only lifecycle/status events:
    `ocr lifecycle ...`, `ocr set-status ...`, `ocr emit ...`.
-6. Aggregate child progress in the coordinator. Update OCR/Telegram only from the aggregated snapshot.
-7. Close the tracker from the coordinator when the task reaches a terminal result.
+7. Aggregate child progress in the coordinator. Update OCR/Telegram only from the aggregated snapshot.
+8. Close the tracker from the coordinator when the task reaches a terminal result.
+
+## Recommended usage pattern
+
+- Keep decomposition, acceptance criteria, and stopping conditions in the coordinator context.
+- Use `ocr orchestrate-fanout` when you want OCR to create the root orchestration record and child tasks in one step.
+- Use `ocr task-status-create/update/close` only from the coordinator path.
+- Treat `ocr start-pipeline` and `ocr roundtable-create` as specialized helpers, not as the default orchestration surface for every task.
 
 ## Status contract
 
@@ -42,6 +52,14 @@ Use this skill when the main agent is the coordinator and OCR is the backend tra
 - On ambiguous Telegram delivery, mark the projection as degraded and continue; do not blindly resend from children.
 - On backend OCR failure, keep the coordinator state in memory and retry the backend write from the coordinator path only.
 
+## Anti-patterns
+
+- Letting a child agent create, mutate, or close the shared tracker.
+- Treating watcher auto-join or watcher refresh side effects as planner state.
+- Using `ocr orchestrate-fanout` as if it were an intelligent decomposition engine.
+- Using Redis as the canonical source of truth for the whole coordinator plan.
+
 ## When to read more
 
 - Read [references/backend-contract.md](references/backend-contract.md) when you need the exact OCR command split, field ownership, and delivery semantics.
+- Use `ocr orchestrate-fanout --spec <json>` when you want a concrete backend-side fan-out helper for the current plan instead of pushing child tasks manually one by one.

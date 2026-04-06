@@ -12,7 +12,7 @@ ocr <command> [args...]
 
 **Exit codes:** `0` — ok, `1` — business error, `2` — infra error (Redis недоступен), `3` — arg error (неверные аргументы).
 
-**Env:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB` или файл `/run/secrets/redis_password`.
+**Env:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`, `OPENCLAW_TELEGRAM_BOT_TOKEN`, `OPENCLAW_TELEGRAM_CHAT_ID`, `OPENCLAW_TELEGRAM_TOPIC_ID`, `OPENCLAW_COORDINATOR_ID`.
 
 **Install model:** OCR source baked into `openclaw` image из `services/openclaw/scripts/multiagent/ocr/`, но `npm install -g` вызывается только в `entrypoint`. Reinstall происходит только если hash image-baked source изменился.
 
@@ -44,22 +44,23 @@ openclaw-orchestrator-install
 4. [Branch Locks](#branch-locks)
 5. [Events](#events)
 6. [Task Routing](#task-routing)
-7. [Pipelines](#pipelines)
-8. [Feedback Loops](#feedback-loops)
-9. [Roundtable](#roundtable)
-10. [Insight Staging](#insight-staging)
-11. [Messaging](#messaging)
-12. [Recovery](#recovery)
-13. [Queries](#queries)
-14. [Bug Tracker](#bug-tracker)
-15. [Task-Status v3](#task-status-v3)
-16. [Cost Tracking](#cost-tracking)
-17. [Garbage Collection](#garbage-collection)
-18. [Daemons](#daemons)
-19. [Reconcile Statuses](#reconcile-statuses)
-20. [Redis Key Schema](#redis-key-schema)
-21. [Architecture Notes](#architecture-notes)
-22. [Тестирование](#тестирование)
+7. [Coordinator Runtime](#coordinator-runtime)
+8. [Pipelines](#pipelines)
+9. [Feedback Loops](#feedback-loops)
+10. [Roundtable](#roundtable)
+11. [Insight Staging](#insight-staging)
+12. [Messaging](#messaging)
+13. [Recovery](#recovery)
+14. [Queries](#queries)
+15. [Bug Tracker](#bug-tracker)
+16. [Task-Status v3](#task-status-v3)
+17. [Cost Tracking](#cost-tracking)
+18. [Garbage Collection](#garbage-collection)
+19. [Daemons](#daemons)
+20. [Reconcile Statuses](#reconcile-statuses)
+21. [Redis Key Schema](#redis-key-schema)
+22. [Architecture Notes](#architecture-notes)
+23. [Тестирование](#тестирование)
 
 ---
 
@@ -324,14 +325,72 @@ ocr route-task '{"text":"упал nginx, 502 ошибки","source":"telegram"}'
 
 ---
 
-## Pipelines
+## Coordinator Runtime
 
-### `start-pipeline --task-id <id> --template <name> [--context <json>]`
+### `orchestrate-fanout --spec <json>`
 
-Запускает pipeline (последовательность шагов агентов). Эмитит `pipeline_started`.
+Coordinator-owned helper for the skill/runtime layer. It persists one root
+orchestration record in `openclaw:orchestration:<task_id>`, optionally creates
+one task-status tracker, and fans out child tasks with shared `run_id` /
+`parent_run_id` metadata.
 
 ```bash
-ocr start-pipeline --task-id task-123 --template feature_delivery --context '{"branch":"feature/auth"}'
+ocr orchestrate-fanout --goal "Fix parser bug and verify the patch" \
+  --agents coder,tester \
+  --coordinator-id teamlead \
+  --title "Parser bug hotfix"
+```
+
+Advanced mode via JSON spec:
+
+```bash
+ocr orchestrate-fanout --spec '{
+  "task_id": "parser-hotfix",
+  "goal": "Fix parser bug and verify the patch",
+  "title": "Parser bug hotfix",
+  "coordinator_id": "teamlead",
+  "create_tracker": true,
+  "topic_id": "1",
+  "children": [
+    {"agent":"coder","title":"Implement the fix","type":"code","acceptance_criteria":"all failing tests pass"},
+    {"agent":"tester","title":"Verify regression coverage","type":"general","acceptance_criteria":"new regression test added"}
+  ]
+}'
+```
+
+Child payloads include:
+
+- `parent_task_id`
+- `parent_run_id`
+- shared `run_id`
+- `child_run_id`
+- `assigned_by`
+- `coordination_mode=parallel`
+- `sibling_agents`
+
+Tracker projection is created only when you pass `--create-tracker true` or
+explicit chat/topic inputs in the command/spec.
+
+If `--coordinator-id` is omitted, OCR falls back to `OPENCLAW_COORDINATOR_ID`.
+
+Use this from the coordinator skill when the plan is already decided and you
+want OCR to materialize the fan-out in one command.
+
+This command is a fan-out materializer, not a full planner. It does not decide
+how many agents to spawn, which subtasks to invent, or when to rebalance the
+plan under load; those decisions remain in the coordinator skill/runtime.
+
+---
+
+## Pipelines
+
+### `start-pipeline --task-id <id> --template <name> [--context <json>] [--topic-id <id>] [--chat-id <id>] [--coordinator-id <id>]`
+
+Запускает pipeline (последовательность шагов агентов). Эмитит `pipeline_started`.
+Если указан `--topic-id`/`--chat-id`, OCR создаёт coordinator-owned tracker для pipeline visibility.
+
+```bash
+ocr start-pipeline --task-id task-123 --template feature_delivery --context '{"branch":"feature/auth"}' --coordinator-id teamlead --owner-id teamlead
 # {"ok":true,"pipeline_id":"pipe_...","template":"feature_delivery","steps":["planner","coder","tester","reviewer"],"current_step":0,"current_agent":"planner"}
 ```
 
@@ -440,9 +499,10 @@ ocr loop-list --status completed --limit 10
 
 Мультиагентное совещание через Redis blackboard. Каждый агент читает предыдущих и добавляет своё.
 
-### `roundtable-create --topic <text> {--participants <csv> | --template <name>} [--context <text>] [--constraints <text>]`
+### `roundtable-create --topic <text> {--participants <csv> | --template <name>} [--context <text>] [--constraints <text>] [--topic-id <id>] [--chat-id <id>] [--coordinator-id <id>]`
 
 Создаёт roundtable. Участники — через CSV-список или шаблон.
+Если указан `--topic-id`/`--chat-id`, OCR создаёт coordinator-owned tracker для roundtable visibility.
 
 **4 шаблона:**
 - `architecture` — planner, ai-researcher, coder, tester
@@ -451,10 +511,10 @@ ocr loop-list --status completed --limit 10
 - `documentation` — writer, ai-researcher, fact-checker, reviewer
 
 ```bash
-ocr roundtable-create --topic "Выбор между PostgreSQL и SQLite" --template architecture --constraints "Должно работать на VPS с 2GB RAM"
+ocr roundtable-create --topic "Выбор между PostgreSQL и SQLite" --template architecture --constraints "Должно работать на VPS с 2GB RAM" --coordinator-id reviewer --owner-id reviewer
 # {"ok":true,"rt_id":"rt_...","topic":"Выбор между PostgreSQL и SQLite","participants":["planner","ai-researcher","coder","tester"],"round":1}
 
-ocr roundtable-create --topic "API design review" --participants "coder,reviewer,tester"
+ocr roundtable-create --topic "API design review" --participants "coder,reviewer,tester" --coordinator-id reviewer
 # {"ok":true,"rt_id":"rt_...","topic":"API design review","participants":["coder","reviewer","tester"],"round":1}
 ```
 
@@ -669,25 +729,23 @@ ocr dashboard
 
 ---
 
-## Известные агенты
+## Schema-Known Agent IDs
 
 ```
-// Core (13 агентов из openclaw.json5):
+// Core:
 nerey, coder, devops, tester, ai-researcher, flash, health,
-fact-checker, writer, planner, monitor, reviewer, codex
+fact-checker, writer, monitor, reviewer, teamlead
 
-// Orchestration:
-teamlead
+// Niche:
+database-optimizer, prompter, travel
 
-// Specialist profiles (.claude/agents/):
-backup-manager, cicd-engineer, database-optimizer,
-frontend-developer, openclaw-engineer, product-manager, pr-reviewer,
-security-auditor, server-admin, software-architect, technical-writer,
-telegram-bot-developer, ui-designer, ux-architect
-
-// Probes:
-e2e-probe
+// Proof-loop:
+task-spec-freezer, task-builder, task-verifier, task-fixer
 ```
+
+Это список `KNOWN_AGENTS` из текущей схемы. Некоторые routing/pipeline templates могут
+ссылаться на deployment-specific IDs вне этого списка; fuzzy-validation ориентируется
+именно на schema-known IDs.
 
 Fuzzy-match подсказки работают для `set-status`, `get-status`, `heartbeat` — при опечатке покажет "Did you mean: ...".
 
@@ -695,7 +753,8 @@ Fuzzy-match подсказки работают для `set-status`, `get-status
 
 ## Bug Tracker
 
-Redis-based баг-трекер. Любой агент может репортить, coder/nerey — триажить.
+Redis-based баг-трекер. Любой агент может репортить; triage/fix ownership задаётся
+оператором или coordinator flow, а не special hardcoded actor.
 
 **Redis-ключи:** `openclaw:bugs:<id>` (hash), `openclaw:bugs:open/fixed/wontfix` (sorted sets), `openclaw:bugs:counter` (auto-increment).
 
@@ -756,6 +815,12 @@ Scoped status messages в Telegram — привязка задач к агент
 - Watcher daemon **обычно** не создаёт и не закрывает — только обновляет и auto-join'ит агентов по `run_id`
 - **Исключение:** watcher может bootstrap/create tracker при событии `agent_spawned` с OCR/task-status context (через `ensureTaskStatusTracker(...)`)
 
+В coordinator-runtime режиме user-visible task обычно имеет:
+
+- один root orchestration record в `openclaw:orchestration:<task_id>`
+- один coordinator-owned tracker в `openclaw:task-status:<task_id>`
+- несколько child tasks с общим `run_id` и `parent_run_id`
+
 ### `task-status-create --task-id <id> --topic-id <id> --title "..." --agents <csv> --coordinator-id <id> [--owner-id <id>] [--chat-id <id>] [--run-id <id>]`
 
 Создаёт Telegram-сообщение со статусом задачи. Идемпотентно — повторный вызов с тем же `task-id` возвращает существующий `message_id`.
@@ -814,7 +879,7 @@ ocr cost-log '{"agent":"coder","model":"claude-opus-4-6","inputTokens":50000,"ou
 
 | Поле | Обязательное | Описание |
 |------|-------------|----------|
-| `agent` | ✅ | ID агента (coder, flash, nerey...) |
+| `agent` | ✅ | ID агента (например `coder`, `flash`, `teamlead`) |
 | `model` | ✅ | ID модели (claude-opus-4-6, gpt-5.4...) |
 | `inputTokens` | — | Входные токены (default 0) |
 | `outputTokens` | — | Выходные токены (default 0) |
@@ -937,6 +1002,7 @@ ocr reconcile-statuses --auto-idle-ms 60000
 | `openclaw:pipeline:<id>` | Hash | 24h | Pipeline state |
 | `openclaw:pipelines:active` | Set | — | Active pipelines index |
 | `openclaw:pipeline:by-task:<id>` | String | 7d | Task → pipeline mapping |
+| `openclaw:orchestration:<task_id>` | Hash | 7d | Root coordinator orchestration record |
 | `openclaw:task-status:<id>` | Hash | 24h | Task-scoped status |
 | `openclaw:task-status:active` | Set | — | Active task-statuses index |
 | `openclaw:task-status-watcher:last_event_id` | String | — | Checkpoint XREAD fallback для watcher |
@@ -960,9 +1026,18 @@ ocr reconcile-statuses --auto-idle-ms 60000
 
 3 попытки с exponential backoff для retryable ошибок (ECONNREFUSED, ETIMEDOUT, LOADING, BUSY). Не ретраит: OOM, AUTH errors, business errors.
 
+### Coordinator Runtime
+
+- `ocr orchestrate-fanout` materializes a ready coordinator plan into Redis.
+- Canonical planner state still lives in the coordinator skill/runtime, not in Redis.
+- `OPENCLAW_COORDINATOR_ID` is only a default ownership binding source for coordinator-owned commands.
+
 ### Roundtable Auto-Cleanup
 
-Когда последний участник отправляет contribution — roundtable hash и :rounds stream автоматически удаляются. Это значит `roundtable-read` и `roundtable-tally` нужно вызывать **до** последнего contribute, либо использовать `roundtable-synthesize`.
+Когда последний участник отправляет contribution — roundtable hash и `:rounds` stream
+не удаляются немедленно, а переводятся на короткий TTL retention window. Это значит
+`roundtable-read` и `roundtable-tally` всё ещё доступны после завершения, но не должны
+рассматриваться как долговременное хранилище.
 
 ### Consumer Groups
 
@@ -977,7 +1052,22 @@ GC автоматически удаляет тестовые consumer groups с
 
 ### Запуск тестов
 
-Тесты запускаются внутри OpenClaw контейнера:
+Быстрый локальный/standalone прогон:
+
+```bash
+node --test tests/coordinator-bindings.test.mjs tests/task-status-local.test.mjs tests/task-status-sync.test.mjs tests/lifecycle-finalization.test.mjs
+```
+
+Полный Redis-backed sequential suite:
+
+```bash
+node scripts/run-redis-tests-sequential.mjs
+```
+
+Этот runner назначает отдельный `REDIS_DB` на файл, запускает suite последовательно,
+проверяет hygiene и делает `FLUSHDB` после каждого файла.
+
+Альтернатива для containerized OpenClaw окружения:
 
 ```bash
 docker exec -it $(docker ps -q -f name=agent_openclaw) sh -c \
@@ -1006,12 +1096,14 @@ docker exec -it $(docker ps -q -f name=agent_openclaw) sh -c \
 | `mailbox-insights.test.mjs` | Mailbox queue/drain, insight staging/promote/dismiss |
 | `routing-dashboard.test.mjs` | Route-task, set/get-status, heartbeat, dashboard |
 | `routing-status-guards.test.mjs` | Busy-primary fallback, roundtable recommendation, stale resurrection guard, epoch fence |
+| `coordinator-bindings.test.mjs` | Ownership bindings and `OPENCLAW_COORDINATOR_ID` defaults |
+| `orchestrator-runtime.test.mjs` | `orchestrate-fanout`, root orchestration record, explicit tracker ownership |
 | `task-status-watcher-fallback-resume.test.mjs` | Task-status watcher restart, XREAD fallback, resume from last_event_id, no duplicate Telegram message |
 | `teamlead-fanout-e2e.test.mjs` | Root task on teamlead, fan-out to coder/tester/reviewer/writer, shared run_id, watcher auto-join, root close |
 | `redis-hygiene.test.mjs` | Meta-тест: проверка отсутствия артефактов после тестов |
 
 Дополнительная матрица сценариев и acceptance-кейсов:
-[docs/multiagent/ocr-test-cases.md](/mnt/repos/agent/docs/multiagent/ocr-test-cases.md)
+[ocr-test-cases.md](/mnt/repos/openclaw-ocr/docs/ocr-test-cases.md)
 
 ### Redis hygiene
 

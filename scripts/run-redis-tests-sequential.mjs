@@ -22,6 +22,7 @@ const DEFAULT_TEST_FILES = [
   'tests/routing-status-guards.test.mjs',
   'tests/lifecycle-hygiene.test.mjs',
   'tests/lifecycle-remote-stop.test.mjs',
+  'tests/orchestrator-runtime.test.mjs',
   'tests/integration-smoke.test.mjs',
   'tests/task-status-bootstrap-pending.test.mjs',
   'tests/task-status-noop-refresh.test.mjs',
