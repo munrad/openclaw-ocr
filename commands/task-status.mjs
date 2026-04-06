@@ -22,11 +22,14 @@ import { KEYS } from '../lib/schema.mjs';
 import { output, argError } from '../lib/errors.mjs';
 import { writeAgentStatus } from '../lib/status-reconcile.mjs';
 import { classifyTelegramFailure, planTaskStatusSync, taskStatusSignature } from '../lib/task-status-sync.mjs';
+import {
+  getDefaultTelegramChatId,
+  getDefaultTelegramTopicId,
+  getTelegramBotToken,
+} from '../lib/config.mjs';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-export const DEFAULT_CHAT_ID = '-1003891295903';
-export const DEFAULT_TASK_TOPIC_ID = '1';
 const TASK_STATUS_TTL_SEC = '86400';
 const IMMUTABLE_BINDING_FIELDS = ['coordinator_id', 'owner_id', 'close_owner_id', 'creator_id'];
 
@@ -52,7 +55,31 @@ function parseArgs(args) {
 // ─── Telegram API ────────────────────────────────────────────────────────────
 
 export function getTelegramToken() {
-  return String(process.env.OPENCLAW_TELEGRAM_BOT_TOKEN || '').trim();
+  return getTelegramBotToken();
+}
+
+export function getDefaultTaskStatusChatId() {
+  return String(getDefaultTelegramChatId() || '').trim();
+}
+
+export function getDefaultTaskStatusTopicId() {
+  return String(getDefaultTelegramTopicId() || '').trim();
+}
+
+export function resolveTaskStatusChatId(input = {}) {
+  return String(
+    input.chat_id
+    || parseChatIdFromTarget(input.channel, input.to)
+    || getDefaultTaskStatusChatId(),
+  ).trim();
+}
+
+export function resolveTaskStatusTopicId(input = {}) {
+  return String(
+    input.topic_id
+    || input.thread_id
+    || getDefaultTaskStatusTopicId(),
+  ).trim();
 }
 
 function tgApi(method, body, timeoutMs = taskStatusTgTimeoutMs()) {
@@ -280,10 +307,8 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
   }
 
   const normalizedAgentId = String(input.agent_id || input.agent || '').trim();
-  const normalizedChatId = String(
-    input.chat_id || parseChatIdFromTarget(input.channel, input.to) || DEFAULT_CHAT_ID,
-  ).trim();
-  const normalizedTopicId = String(input.topic_id || input.thread_id || DEFAULT_TASK_TOPIC_ID).trim();
+  const normalizedChatId = resolveTaskStatusChatId(input);
+  const normalizedTopicId = resolveTaskStatusTopicId(input);
   const normalizedRunId = String(input.run_id || input.task_id || normalizedTaskId).trim() || normalizedTaskId;
   const normalizedTitle = String(
     input.title || input.label || input.task_title || input.task || normalizedTaskId,
@@ -302,6 +327,14 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
   });
 
   const existing = getTaskData(normalizedTaskId);
+  const effectiveChatId = String(existing.chat_id || normalizedChatId).trim();
+  if (!effectiveChatId) {
+    return {
+      ok: false,
+      error: 'missing_chat_id',
+      description: 'task-status tracker requires chat_id or OPENCLAW_TELEGRAM_CHAT_ID',
+    };
+  }
   const existingAgents = uniqueAgents(parseJson(existing.agents, []));
   const nextAgents = uniqueAgents([...existingAgents, normalizedAgentId]);
 
@@ -335,7 +368,7 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
         ...latest,
         ...(latest.title ? {} : { title: normalizedTitle }),
         ...(latest.run_id ? {} : { run_id: normalizedRunId }),
-        ...(latest.chat_id ? {} : { chat_id: normalizedChatId }),
+        ...(latest.chat_id ? {} : { chat_id: effectiveChatId }),
         ...(latest.topic_id ? {} : { topic_id: normalizedTopicId }),
         agents: JSON.stringify(mergedAgents),
         updated_at: new Date().toISOString(),
@@ -348,7 +381,7 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
     title: existing.title || normalizedTitle,
     agents: nextAgents,
     topic_id: existing.topic_id || normalizedTopicId,
-    chat_id: existing.chat_id || normalizedChatId,
+    chat_id: effectiveChatId,
     run_id: existing.run_id || normalizedRunId,
     coordinator_id: existing.coordinator_id || normalizedCoordinatorId,
     owner_id: existing.owner_id || normalizedCoordinatorId,
@@ -375,7 +408,7 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
       title: normalizedTitle,
       agents: nextAgents,
       topic_id: normalizedTopicId,
-      chat_id: normalizedChatId,
+      chat_id: effectiveChatId,
       run_id: normalizedRunId,
       coordinator_id: normalizedCoordinatorId,
       owner_id: normalizedCoordinatorId,
@@ -409,8 +442,8 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
 // ─── Task Payload ────────────────────────────────────────────────────────────
 
 function createTaskPayload(taskId, input = {}) {
-  const topicId = String(input.topic_id || DEFAULT_TASK_TOPIC_ID);
-  const chatId = String(input.chat_id || DEFAULT_CHAT_ID);
+  const topicId = resolveTaskStatusTopicId(input);
+  const chatId = resolveTaskStatusChatId(input);
   const runId = String(input.run_id || taskId);
   const coordinatorId = String(input.coordinator_id || '').trim();
   const ownerId = String(input.owner_id || coordinatorId || '').trim();
@@ -503,6 +536,14 @@ export async function createTaskStatusMessage(taskId, input = {}) {
         message_id: existing.message_id,
         task: existing,
         idempotent: true,
+      };
+    }
+
+    if (!resolveTaskStatusChatId({ ...existing, ...input })) {
+      return {
+        ok: false,
+        error: 'missing_chat_id',
+        description: 'task-status-create requires --chat-id or OPENCLAW_TELEGRAM_CHAT_ID',
       };
     }
 
@@ -643,7 +684,7 @@ export async function cmdTaskStatusCreate(args) {
   const topicId = opts.topic_id;
   const title = opts.title;
   const agentsStr = opts.agents;
-  const chatId = opts.chat_id || DEFAULT_CHAT_ID;
+  const chatId = resolveTaskStatusChatId(opts);
   const runId = opts.run_id || taskId;
   const coordinatorId = opts.coordinator_id || opts.coordinator;
   const ownerId = opts.owner_id || opts.owner || coordinatorId;
@@ -753,6 +794,17 @@ export async function cmdTaskStatusUpdate(args) {
   const agents = parseJson(taskData.agents, []);
   const agentStatuses = getAgentStatuses(agents);
   const text = renderTaskStatus(taskData, agentStatuses);
+  const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
+  if (!chatId) {
+    output({
+      ok: false,
+      updated: false,
+      tg_ok: false,
+      error: 'missing_chat_id',
+      description: 'task-status-update requires tracker chat_id or OPENCLAW_TELEGRAM_CHAT_ID',
+    });
+    return;
+  }
   const plan = planTaskStatusSync(taskData, text, { force });
 
   if (!plan.shouldSend) {
@@ -776,7 +828,7 @@ export async function cmdTaskStatusUpdate(args) {
   }
 
   const editBody = {
-    chat_id: taskData.chat_id || DEFAULT_CHAT_ID,
+    chat_id: chatId,
     message_id: parseInt(taskData.message_id, 10),
     text,
     parse_mode: 'HTML',
@@ -856,9 +908,21 @@ export async function cmdTaskStatusClose(args) {
   const agentStatuses = getAgentStatuses(agents);
   const closeResult = result === 'fail' ? 'fail' : 'success';
   const text = renderTaskStatus(taskData, agentStatuses, closeResult);
+  const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
+  if (!chatId) {
+    output({
+      ok: false,
+      closed: false,
+      tg_ok: false,
+      error: 'missing_chat_id',
+      description: 'task-status-close requires tracker chat_id or OPENCLAW_TELEGRAM_CHAT_ID',
+    });
+    process.exitCode = 1;
+    return;
+  }
 
   const editBody = {
-    chat_id: taskData.chat_id || DEFAULT_CHAT_ID,
+    chat_id: chatId,
     message_id: parseInt(taskData.message_id, 10),
     text,
     parse_mode: 'HTML',

@@ -4,8 +4,14 @@ import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHANNEL_TARGET,
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
+ensureTestTelegramEnv(process.env);
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -130,9 +136,9 @@ async function main() {
       task_id: taskId,
       title: `Spawn bootstrap ${taskId}`,
       channel: 'telegram',
-      to: 'channel:-1003891295903',
+      to: TEST_TELEGRAM_CHANNEL_TARGET,
       thread_id: '1',
-      chat_id: '-1003891295903',
+      chat_id: TEST_TELEGRAM_CHAT_ID,
       topic_id: '1',
       label: 'ocr-bootstrap-test',
       mode: 'run',
@@ -158,7 +164,7 @@ async function main() {
     assert.equal(agentHash.progress, '0');
     assert.equal(agentHash.run_id, taskId);
     if (taskHash.message_id) {
-      createdMessages.push({ chatId: taskHash.chat_id || '-1003891295903', messageId: taskHash.message_id });
+      createdMessages.push({ chatId: taskHash.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: taskHash.message_id });
     }
 
     const initialMessageId = String(taskHash.message_id || '');
@@ -170,9 +176,9 @@ async function main() {
       task_id: taskId,
       title: `Spawn bootstrap ${taskId}`,
       channel: 'telegram',
-      to: 'channel:-1003891295903',
+      to: TEST_TELEGRAM_CHANNEL_TARGET,
       thread_id: '1',
-      chat_id: '-1003891295903',
+      chat_id: TEST_TELEGRAM_CHAT_ID,
       topic_id: '1',
       label: 'ocr-bootstrap-test',
       mode: 'run',
@@ -237,9 +243,9 @@ async function main() {
       task_id: taskId,
       title: `Spawn bootstrap ${taskId}`,
       channel: 'telegram',
-      to: 'channel:-1003891295903',
+      to: TEST_TELEGRAM_CHANNEL_TARGET,
       thread_id: '1',
-      chat_id: '-1003891295903',
+      chat_id: TEST_TELEGRAM_CHAT_ID,
       topic_id: '1',
       label: 'ocr-bootstrap-test',
       mode: 'run',

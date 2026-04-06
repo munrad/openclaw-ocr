@@ -4,8 +4,13 @@ import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
+ensureTestTelegramEnv(process.env);
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -128,7 +133,7 @@ async function main() {
             ok: true,
             task_id: taskId,
             message_id: '555001',
-            chat_id: '-1003891295903',
+            chat_id: TEST_TELEGRAM_CHAT_ID,
           };
           redisCli(['HSET', `openclaw:task-status:${taskId}`,
             'task_id', taskId,
@@ -150,7 +155,7 @@ async function main() {
           return synthetic;
         })();
 
-    createdMessages.push({ chatId: create.chat_id || '-1003891295903', messageId: create.message_id });
+    createdMessages.push({ chatId: create.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: create.message_id });
 
     const watcherEnv = {
       ...process.env,

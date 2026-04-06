@@ -11,6 +11,14 @@ import {
   getTaskData,
   tgApiSafe,
 } from '../commands/task-status.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  TEST_TELEGRAM_BOT_TOKEN,
+  TEST_TELEGRAM_TOPIC_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
+
+ensureTestTelegramEnv(process.env, { token: TEST_TELEGRAM_BOT_TOKEN });
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -88,8 +96,8 @@ async function main() {
         'run_id', taskId,
         'title', `Existing tracker ${taskId}`,
         'agents', '["coder"]',
-        'topic_id', '72',
-        'chat_id', '-1003891295903',
+        'topic_id', TEST_TELEGRAM_TOPIC_ID,
+        'chat_id', TEST_TELEGRAM_CHAT_ID,
         'status', 'running',
         'message_id', '777001',
         'coordinator_id', 'teamlead',
@@ -103,8 +111,8 @@ async function main() {
 
       const result = await ensureTaskStatusTracker(taskId, {
         agent_id: 'tester',
-        chat_id: '-1003891295903',
-        topic_id: '72',
+        chat_id: TEST_TELEGRAM_CHAT_ID,
+        topic_id: TEST_TELEGRAM_TOPIC_ID,
         run_id: taskId,
         title: `Existing tracker ${taskId}`,
         coordinator_id: 'teamlead',
@@ -158,8 +166,8 @@ async function main() {
         'run_id', taskId,
         'title', `Close timeout ${taskId}`,
         'agents', '["coder"]',
-        'topic_id', '72',
-        'chat_id', '-1003891295903',
+        'topic_id', TEST_TELEGRAM_TOPIC_ID,
+        'chat_id', TEST_TELEGRAM_CHAT_ID,
         'status', 'running',
         'message_id', '888002',
         'coordinator_id', 'teamlead',
@@ -204,8 +212,8 @@ async function main() {
         'run_id', taskId,
         'title', `Bootstrap pending ${taskId}`,
         'agents', '["coder"]',
-        'topic_id', '72',
-        'chat_id', '-1003891295903',
+        'topic_id', TEST_TELEGRAM_TOPIC_ID,
+        'chat_id', TEST_TELEGRAM_CHAT_ID,
         'status', 'running',
         'bootstrap_pending', '1',
         'coordinator_id', 'teamlead',
@@ -231,8 +239,8 @@ async function main() {
 
       const result = await ensureTaskStatusTracker(taskId, {
         agent_id: 'tester',
-        chat_id: '-1003891295903',
-        topic_id: '72',
+        chat_id: TEST_TELEGRAM_CHAT_ID,
+        topic_id: TEST_TELEGRAM_TOPIC_ID,
         run_id: taskId,
         title: `Bootstrap pending ${taskId}`,
         coordinator_id: 'teamlead',

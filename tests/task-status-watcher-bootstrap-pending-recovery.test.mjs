@@ -6,9 +6,14 @@ import https from 'node:https';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_BOT_TOKEN,
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 // Ensure watcher/token guard passes even in CI environments without a real TG token.
-process.env.OPENCLAW_TELEGRAM_BOT_TOKEN ||= '1:fake';
+ensureTestTelegramEnv(process.env, { token: TEST_TELEGRAM_BOT_TOKEN });
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
 
@@ -57,7 +62,7 @@ function seedBootstrapPendingTask({ taskId, titleMarker, createdAtIso }) {
     'title', `Bootstrap pending ${titleMarker} ${taskId}`,
     'agents', '["coder"]',
     'topic_id', '1',
-    'chat_id', '-1003891295903',
+    'chat_id', TEST_TELEGRAM_CHAT_ID,
     'status', 'running',
     'bootstrap_pending', '1',
     'bootstrap_retry_count', '0',

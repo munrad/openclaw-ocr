@@ -18,8 +18,13 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
+ensureTestTelegramEnv(process.env);
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -144,7 +149,7 @@ async function main() {
     const taskHash1 = hgetall(`openclaw:task-status:${taskId1}`);
     if (create1?.ok) {
       assert.ok(create1.message_id, 'should have message_id');
-      createdMessages.push({ chatId: create1.chat_id || '-1003891295903', messageId: create1.message_id });
+      createdMessages.push({ chatId: create1.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: create1.message_id });
       assert.ok(taskHash1.message_id, 'Redis should have message_id');
       assert.ok(taskHash1.delivery_verified !== undefined, 'delivery_verified field should exist');
     } else if (create1?.error === 'phantom_message_detected') {
@@ -195,7 +200,7 @@ async function main() {
       if (create1.ok) {
         assert.notEqual(create2.message_id, create1.message_id, 'new task must get different message_id');
       }
-      createdMessages.push({ chatId: create2.chat_id || '-1003891295903', messageId: create2.message_id });
+      createdMessages.push({ chatId: create2.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: create2.message_id });
 
       // ─── Test 4: Auto-join by shared run_id ────────────────────────────────
 

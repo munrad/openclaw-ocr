@@ -4,7 +4,8 @@
   "description": "OpenClaw-Redis CLI for multi-agent coordination",
   "type": "module",
   "bin": {
-    "ocr": "./index.mjs"
+    "ocr": "./index.mjs",
+    "openclaw-orchestrator-install": "./scripts/install-openclaw-orchestrator.mjs"
   },
   "files": [
     "index.mjs",
@@ -13,6 +14,7 @@
     "lifecycle-daemon.mjs",
     "commands/",
     "lib/",
+    "scripts/",
     "skills/"
   ]
 }

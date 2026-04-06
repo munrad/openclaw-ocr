@@ -14,7 +14,8 @@
  *   Fallback: Redis events stream (XREAD) + periodic refresh (30s)
  *
  * Usage: node task-status-watcher.mjs
- * Env: OPENCLAW_TELEGRAM_BOT_TOKEN, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
+ * Env: OPENCLAW_TELEGRAM_BOT_TOKEN, OPENCLAW_TELEGRAM_CHAT_ID,
+ *      OPENCLAW_TELEGRAM_TOPIC_ID, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
  */
 
 import { spawn } from 'node:child_process';
@@ -23,9 +24,9 @@ import { redis, redisRaw, parseHgetall, parseJson } from './lib/redis.mjs';
 import { KEYS } from './lib/schema.mjs';
 import { CONFIG } from './lib/config.mjs';
 import {
-  DEFAULT_CHAT_ID,
   ensureTaskStatusTracker,
   getAgentStatuses,
+  getDefaultTaskStatusChatId,
   getTaskData,
   getTelegramToken,
   persistTaskStatus,
@@ -352,9 +353,20 @@ async function recoverStaleBootstrapPending() {
     const agents = parseJson(taskData.agents, []);
     const agentStatuses = getAgentStatuses(agents);
     const text = renderTaskStatus(taskData, agentStatuses);
+    const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
+    if (!chatId) {
+      persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
+        ...taskData,
+        delivery_state: 'suppressed',
+        delivery_error: 'missing chat_id for bootstrap_pending recovery',
+        updated_at: new Date().toISOString(),
+      }));
+      log(`bootstrap_pending recovery: ${taskId} missing chat_id, suppressing retry`);
+      continue;
+    }
 
     const sendBody = {
-      chat_id: taskData.chat_id || DEFAULT_CHAT_ID,
+      chat_id: chatId,
       text,
       parse_mode: 'HTML',
       ...topicParams(taskData.topic_id),
@@ -404,6 +416,16 @@ async function updateTask(taskId) {
   const agents = parseJson(taskData.agents, []);
   const agentStatuses = getAgentStatuses(agents);
   const text = renderTaskStatus(taskData, agentStatuses);
+  const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
+  if (!chatId) {
+    persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
+      ...taskData,
+      delivery_state: 'suppressed',
+      delivery_error: 'missing chat_id for task-status update',
+    }));
+    log(`Skipped task ${taskId}: missing chat_id`);
+    return { outcome: 'delivery_suppressed' };
+  }
   const plan = planTaskStatusSync(taskData, text);
   if (!plan.shouldSend) {
     if (plan.reason === 'no_change' && !taskData.rendered_signature) {
@@ -421,7 +443,7 @@ async function updateTask(taskId) {
   }
 
   const editBody = {
-    chat_id: taskData.chat_id || DEFAULT_CHAT_ID,
+    chat_id: chatId,
     message_id: parseInt(taskData.message_id, 10),
     text,
     parse_mode: 'HTML',

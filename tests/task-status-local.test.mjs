@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import https from 'node:https';
 import { test } from 'node:test';
+import { getDefaultTelegramChatId, getDefaultTelegramTopicId } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  TEST_TELEGRAM_GENERAL_TOPIC_ID,
+  TEST_TELEGRAM_LAZY_BOT_TOKEN,
+} from './helpers/telegram-test-config.mjs';
 
 test('tgApiSafe reads OPENCLAW_TELEGRAM_BOT_TOKEN lazily at call time', async () => {
   const previousToken = process.env.OPENCLAW_TELEGRAM_BOT_TOKEN;
@@ -33,13 +39,32 @@ test('tgApiSafe reads OPENCLAW_TELEGRAM_BOT_TOKEN lazily at call time', async ()
   };
 
   try {
-    process.env.OPENCLAW_TELEGRAM_BOT_TOKEN = 'lazy-token';
+    process.env.OPENCLAW_TELEGRAM_BOT_TOKEN = TEST_TELEGRAM_LAZY_BOT_TOKEN;
     const result = await tgApiSafe('sendMessage', { chat_id: '1', text: 'hello' }, 1, { timeoutMs: 300 });
     assert.equal(result.ok, true);
-    assert.equal(capturedPath, '/botlazy-token/sendMessage');
+    assert.equal(capturedPath, `/bot${TEST_TELEGRAM_LAZY_BOT_TOKEN}/sendMessage`);
   } finally {
     https.request = originalRequest;
     if (previousToken === undefined) delete process.env.OPENCLAW_TELEGRAM_BOT_TOKEN;
     else process.env.OPENCLAW_TELEGRAM_BOT_TOKEN = previousToken;
+  }
+});
+
+test('telegram chat/topic defaults read lazily from env at call time', () => {
+  const previousChatId = process.env.OPENCLAW_TELEGRAM_CHAT_ID;
+  const previousTopicId = process.env.OPENCLAW_TELEGRAM_TOPIC_ID;
+  delete process.env.OPENCLAW_TELEGRAM_CHAT_ID;
+  delete process.env.OPENCLAW_TELEGRAM_TOPIC_ID;
+
+  try {
+    process.env.OPENCLAW_TELEGRAM_CHAT_ID = TEST_TELEGRAM_CHAT_ID;
+    process.env.OPENCLAW_TELEGRAM_TOPIC_ID = TEST_TELEGRAM_GENERAL_TOPIC_ID;
+    assert.equal(getDefaultTelegramChatId(), TEST_TELEGRAM_CHAT_ID);
+    assert.equal(getDefaultTelegramTopicId(), TEST_TELEGRAM_GENERAL_TOPIC_ID);
+  } finally {
+    if (previousChatId === undefined) delete process.env.OPENCLAW_TELEGRAM_CHAT_ID;
+    else process.env.OPENCLAW_TELEGRAM_CHAT_ID = previousChatId;
+    if (previousTopicId === undefined) delete process.env.OPENCLAW_TELEGRAM_TOPIC_ID;
+    else process.env.OPENCLAW_TELEGRAM_TOPIC_ID = previousTopicId;
   }
 });

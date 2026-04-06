@@ -4,8 +4,13 @@ import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
+ensureTestTelegramEnv(process.env);
 const password = CONFIG.password || process.env.REDIS_PASSWORD || (() => {
   try { return readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch { return ''; }
 })();
@@ -162,7 +167,7 @@ async function main() {
             ok: true,
             task_id: rootTaskId,
             message_id: '777001',
-            chat_id: '-1003891295903',
+            chat_id: TEST_TELEGRAM_CHAT_ID,
           };
           redisCli(['HSET', `openclaw:task-status:${rootTaskId}`,
             'task_id', rootTaskId,
@@ -183,7 +188,7 @@ async function main() {
           redisCli(['SADD', 'openclaw:task-status:active', rootTaskId]);
           return synthetic;
         })();
-    createdMessages.push({ chatId: taskStatus.chat_id || '-1003891295903', messageId: taskStatus.message_id });
+    createdMessages.push({ chatId: taskStatus.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: taskStatus.message_id });
 
     watcherProc = spawn('node', [OCR_BIN.pathname, 'daemon', 'task-status'], {
       env: process.env,

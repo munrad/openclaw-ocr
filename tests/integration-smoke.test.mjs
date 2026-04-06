@@ -4,8 +4,13 @@ import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
+ensureTestTelegramEnv(process.env);
 const password = CONFIG.password || process.env.REDIS_PASSWORD || (() => {
   try { return readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch { return ''; }
 })();
@@ -247,7 +252,7 @@ async function main() {
     ]).json;
     assert.equal(tsCreate1.ok, true);
     assert.ok(tsCreate1.message_id, 'create should return message_id');
-    created.messages.push({ chatId: tsCreate1.chat_id || '-1003891295903', messageId: tsCreate1.message_id });
+    created.messages.push({ chatId: tsCreate1.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: tsCreate1.message_id });
 
     // Second create with same task_id → must return same message_id (idempotent)
     const tsCreate2 = ocr([
@@ -334,7 +339,7 @@ async function main() {
       '--owner-id', 'teamlead',
     ]).json;
     assert.equal(watcherCreate.ok, true);
-    created.messages.push({ chatId: watcherCreate.chat_id || '-1003891295903', messageId: watcherCreate.message_id });
+    created.messages.push({ chatId: watcherCreate.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: watcherCreate.message_id });
 
     const watcherProc = spawn('node', [OCR_BIN.pathname, 'daemon', 'task-status'], {
       env: process.env,

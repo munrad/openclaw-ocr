@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  TEST_TELEGRAM_BOT_TOKEN,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
-process.env.OPENCLAW_TELEGRAM_BOT_TOKEN ||= '1:fake';
+ensureTestTelegramEnv(process.env, { token: TEST_TELEGRAM_BOT_TOKEN });
 process.env.STATUS_PUBSUB_ENABLED = '0';
 
 function hasRedisCli() {

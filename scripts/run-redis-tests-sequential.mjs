@@ -5,6 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_BOT_TOKEN,
+  ensureTestTelegramEnv,
+} from '../tests/helpers/telegram-test-config.mjs';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HYGIENE_TEST = 'tests/redis-hygiene.test.mjs';
@@ -130,13 +134,12 @@ async function main() {
 
   for (const [index, file] of testFiles.entries()) {
     const db = (baseDb + index) % dbCount;
-    const env = {
+    const env = ensureTestTelegramEnv({
       ...process.env,
       REDIS_DB: String(db),
-      OCR_INTEGRATION_SKIP_TELEGRAM:
-        process.env.OCR_INTEGRATION_SKIP_TELEGRAM
-        || (process.env.OPENCLAW_TELEGRAM_BOT_TOKEN === '1:fake' ? '1' : '0'),
-    };
+    });
+    env.OCR_INTEGRATION_SKIP_TELEGRAM = env.OCR_INTEGRATION_SKIP_TELEGRAM
+      || (env.OPENCLAW_TELEGRAM_BOT_TOKEN === TEST_TELEGRAM_BOT_TOKEN ? '1' : '0');
 
     log(`starting ${file} on REDIS_DB=${db}`);
     flushDb(db);

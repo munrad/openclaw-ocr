@@ -3,6 +3,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { CONFIG } from '../lib/config.mjs';
 import { ensureTaskStatusTracker, getTaskData } from '../commands/task-status.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  TEST_TELEGRAM_GENERAL_TOPIC_ID,
+} from './helpers/telegram-test-config.mjs';
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -30,8 +34,8 @@ async function main() {
       'run_id', taskId,
       'title', `Bootstrap pending ${taskId}`,
       'agents', '["coder"]',
-      'topic_id', '1',
-      'chat_id', '-1003891295903',
+      'topic_id', TEST_TELEGRAM_GENERAL_TOPIC_ID,
+      'chat_id', TEST_TELEGRAM_CHAT_ID,
       'status', 'running',
       'coordinator_id', 'teamlead',
       'owner_id', 'teamlead',
@@ -45,8 +49,8 @@ async function main() {
 
     const result = await ensureTaskStatusTracker(taskId, {
       agent_id: 'tester',
-      chat_id: '-1003891295903',
-      topic_id: '1',
+      chat_id: TEST_TELEGRAM_CHAT_ID,
+      topic_id: TEST_TELEGRAM_GENERAL_TOPIC_ID,
       run_id: taskId,
       title: `Bootstrap pending ${taskId}`,
       coordinator_id: 'teamlead',

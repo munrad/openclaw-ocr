@@ -18,8 +18,13 @@ import { readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import https from 'node:https';
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
+ensureTestTelegramEnv(process.env);
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -147,7 +152,7 @@ async function main() {
       // Success path: message was created and delivery verified (General not hidden)
       assert.ok(create1.json.message_id, 'should have message_id');
       assert.ok('delivery_verified' in create1.json, 'delivery_verified field should be in output');
-      createdMessages.push({ chatId: create1.json.chat_id || '-1003891295903', messageId: create1.json.message_id });
+      createdMessages.push({ chatId: create1.json.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: create1.json.message_id });
       
       // Verify Redis has delivery_verified
       const hash1 = hgetall(`openclaw:task-status:${taskId1}`);
@@ -185,7 +190,7 @@ async function main() {
     if (create2.json?.ok) {
       assert.ok(create2.json.message_id, 'non-General topic should get message_id');
       assert.notEqual(create2.json.error, 'phantom_message_detected', 'non-General topic should not phantom');
-      createdMessages.push({ chatId: create2.json.chat_id || '-1003891295903', messageId: create2.json.message_id });
+      createdMessages.push({ chatId: create2.json.chat_id || TEST_TELEGRAM_CHAT_ID, messageId: create2.json.message_id });
       checks.push('non-General topic create: succeeds without phantom');
     } else {
       checks.push(`non-General topic create: ${create2.json?.error || 'failed'} (may be invalid topic)`);
@@ -199,7 +204,7 @@ async function main() {
       'title', `Dup test ${taskIdDup}`,
       'agents', '["coder"]',
       'topic_id', '72',
-      'chat_id', '-1003891295903',
+      'chat_id', TEST_TELEGRAM_CHAT_ID,
       'run_id', taskIdDup,
       'coordinator_id', 'teamlead',
       'owner_id', 'teamlead',
@@ -236,7 +241,7 @@ async function main() {
     
     // Simulate: if message_id appeared (from CLI direct create), verify idempotency
     if (createDup.json?.ok && createDup.json.message_id) {
-      createdMessages.push({ chatId: '-1003891295903', messageId: createDup.json.message_id });
+      createdMessages.push({ chatId: TEST_TELEGRAM_CHAT_ID, messageId: createDup.json.message_id });
       
       // Verify idempotent re-create
       const createDup2 = ocr([

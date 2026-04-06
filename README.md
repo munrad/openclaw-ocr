@@ -36,6 +36,36 @@ npm install -g .
 ocr --help
 ```
 
+## Install The Coordinator Skill
+
+Initial bootstrap from this repository:
+
+```bash
+node scripts/install-openclaw-orchestrator.mjs
+```
+
+What it does:
+
+- syncs `skills/openclaw-orchestrator/` into `${CODEX_HOME:-~/.codex}/skills/openclaw-orchestrator`
+- runs `npm install -g <repo-root>` to refresh the `ocr` CLI from this checkout
+- verifies that `ocr --help` works after install
+
+For later refreshes, the package also exposes:
+
+```bash
+openclaw-orchestrator-install
+```
+
+Useful flags:
+
+- `--skill-only`
+- `--ocr-only`
+- `--target <path>`
+- `--dry-run`
+- `--json`
+
+Restart Codex/OpenClaw after installation so the new skill is discovered.
+
 For the coordinator-facing skill contract, see
 [`skills/openclaw-orchestrator/SKILL.md`](skills/openclaw-orchestrator/SKILL.md).
 

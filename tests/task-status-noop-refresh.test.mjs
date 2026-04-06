@@ -5,6 +5,11 @@ import https from 'node:https';
 import { readFileSync } from 'node:fs';
 
 import { CONFIG } from '../lib/config.mjs';
+import {
+  TEST_TELEGRAM_BOT_TOKEN,
+  TEST_TELEGRAM_CHAT_ID,
+  ensureTestTelegramEnv,
+} from './helpers/telegram-test-config.mjs';
 
 function redisCli(args) {
   const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
@@ -56,7 +61,7 @@ async function main() {
   const cleanupFns = [];
 
   try {
-    process.env.OPENCLAW_TELEGRAM_BOT_TOKEN ||= 'test-token';
+    ensureTestTelegramEnv(process.env, { token: TEST_TELEGRAM_BOT_TOKEN });
     const taskStatus = await import('../commands/task-status.mjs');
     const { renderTaskStatus, cmdTaskStatusUpdate, getTaskData } = taskStatus;
 
@@ -111,7 +116,7 @@ async function main() {
         'title', `No-op refresh ${taskId}`,
         'agents', '["coder"]',
         'topic_id', '72',
-        'chat_id', '-1003891295903',
+        'chat_id', TEST_TELEGRAM_CHAT_ID,
         'status', 'running',
         'message_id', '123456',
         'coordinator_id', 'teamlead',

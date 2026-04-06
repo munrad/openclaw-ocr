@@ -16,6 +16,24 @@ ocr <command> [args...]
 
 **Install model:** OCR source baked into `openclaw` image из `services/openclaw/scripts/multiagent/ocr/`, но `npm install -g` вызывается только в `entrypoint`. Reinstall происходит только если hash image-baked source изменился.
 
+**Coordinator skill install:** для standalone checkout этого репозитория используйте:
+
+```bash
+node scripts/install-openclaw-orchestrator.mjs
+```
+
+Installer:
+
+- синхронизирует `skills/openclaw-orchestrator/` в `${CODEX_HOME:-~/.codex}/skills/openclaw-orchestrator`
+- обновляет `ocr` через `npm install -g <repo-root>`
+- проверяет `ocr --help`
+
+После первой установки доступна и bin-команда:
+
+```bash
+openclaw-orchestrator-install
+```
+
 ---
 
 ## Оглавление
@@ -964,8 +982,18 @@ GC автоматически удаляет тестовые consumer groups с
 ```bash
 docker exec -it $(docker ps -q -f name=agent_openclaw) sh -c \
   'export OPENCLAW_TELEGRAM_BOT_TOKEN=$(cat /run/secrets/telegram_bot_token) && \
+   export OPENCLAW_TELEGRAM_CHAT_ID=$(cat /run/secrets/telegram_chat_id) && \
+   export OPENCLAW_TELEGRAM_TOPIC_ID=$(cat /run/secrets/telegram_topic_id 2>/dev/null || printf 1) && \
    node /app/scripts/multiagent/ocr/tests/<test-file>.mjs'
 ```
+
+Для `task-status` и watcher дефолтный Telegram runtime-config теперь задаётся через env/secrets:
+
+- `OPENCLAW_TELEGRAM_BOT_TOKEN` или `/run/secrets/telegram_bot_token`
+- `OPENCLAW_TELEGRAM_CHAT_ID` или `/run/secrets/telegram_chat_id`
+- `OPENCLAW_TELEGRAM_TOPIC_ID` или `/run/secrets/telegram_topic_id`
+
+Если `chat_id` не передан в команду и не задан в runtime-config, `task-status-create` и watcher теперь падают явно, а не используют зашитый chat id.
 
 ### Набор тестов
 
