@@ -1134,6 +1134,11 @@ docker exec -it $(docker ps -q -f name=agent_openclaw) sh -c \
 
 Если `chat_id` не передан в команду и не задан в runtime-config, `task-status-create` и watcher теперь падают явно, а не используют зашитый chat id.
 
+Для финальной staging/load/recovery валидации используйте:
+
+- [production-validation.md](/mnt/repos/openclaw-ocr/docs/production-validation.md)
+- `node scripts/orchestrator-burst-smoke.mjs --help`
+
 ### Набор тестов
 
 | Файл | Покрытие |

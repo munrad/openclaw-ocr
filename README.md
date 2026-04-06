@@ -86,6 +86,11 @@ node scripts/run-redis-tests-sequential.mjs
 The runner assigns a separate `REDIS_DB` to each test file, runs them sequentially,
 checks Redis hygiene on the same DB, and flushes that DB after each file.
 
+For final staging/load/recovery validation, use:
+
+- [production-validation.md](/mnt/repos/openclaw-ocr/docs/production-validation.md)
+- `node scripts/orchestrator-burst-smoke.mjs --help`
+
 ## Coordinator Runtime
 
 OCR now includes a coordinator-owned fan-out command for the skill/runtime layer:
