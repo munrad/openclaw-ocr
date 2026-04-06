@@ -12,7 +12,7 @@ ocr <command> [args...]
 
 **Exit codes:** `0` — ok, `1` — business error, `2` — infra error (Redis недоступен), `3` — arg error (неверные аргументы).
 
-**Env:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` или файл `/run/secrets/redis_password`.
+**Env:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB` или файл `/run/secrets/redis_password`.
 
 **Install model:** OCR source baked into `openclaw` image из `services/openclaw/scripts/multiagent/ocr/`, но `npm install -g` вызывается только в `entrypoint`. Reinstall происходит только если hash image-baked source изменился.
 

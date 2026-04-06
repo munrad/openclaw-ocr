@@ -197,9 +197,15 @@ function formatTaskStatusTimestamp(taskData, agentStatuses, { isClosed = false }
 }
 
 /** For topic_id=1 (General), TG API doesn't accept message_thread_id */
+export function isGeneralTopic(id) {
+  const n = parseInt(id, 10);
+  return !n || n === 1;
+}
+
+/** For topic_id=1 (General), TG API doesn't accept message_thread_id */
 export function topicParams(id) {
   const n = parseInt(id, 10);
-  return (!n || n === 1) ? {} : { message_thread_id: n };
+  return isGeneralTopic(n) ? {} : { message_thread_id: n };
 }
 
 function uniqueAgents(agents) {

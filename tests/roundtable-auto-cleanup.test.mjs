@@ -6,7 +6,7 @@ import { CONFIG } from '../lib/config.mjs';
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
 
 function redisCli(args) {
-  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
   let password = CONFIG.password || process.env.REDIS_PASSWORD || '';
   if (!password) {
     try { password = readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch {}
@@ -62,10 +62,13 @@ try {
   assert.equal(second.ok, true);
   assert.ok(second.entry_id);
 
-  assert.equal(redisCli(['EXISTS', rtKey]), '0');
-  assert.equal(redisCli(['EXISTS', streamKey]), '0');
+  assert.equal(redisCli(['EXISTS', rtKey]), '1');
+  assert.equal(redisCli(['EXISTS', streamKey]), '1');
+  assert.equal(redisCli(['HGET', rtKey, 'status']), 'completed');
+  assert.ok(Number(redisCli(['TTL', rtKey])) > 0, 'completed roundtable hash should stay on a short TTL');
+  assert.ok(Number(redisCli(['TTL', streamKey])) > 0, 'completed roundtable stream should stay on a short TTL');
 
-  console.log(JSON.stringify({ ok: true, rt_id: rtId, auto_cleanup: true }));
+  console.log(JSON.stringify({ ok: true, rt_id: rtId, auto_cleanup: true, retained_with_ttl: true }));
 } finally {
   cleanupIfExists(rtId);
 }

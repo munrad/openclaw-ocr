@@ -29,7 +29,9 @@ function ocr(args, opts = {}) {
 
 function redisCli(args) {
   const cmd = ['redis-cli', '-h', process.env.REDIS_HOST || 'redis',
-    '-p', process.env.REDIS_PORT || '6379', '--no-auth-warning'];
+    '-p', process.env.REDIS_PORT || '6379',
+    '-n', process.env.REDIS_DB || '0',
+    '--no-auth-warning'];
   if (process.env.REDIS_PASSWORD) cmd.push('-a', process.env.REDIS_PASSWORD);
   else {
     try {

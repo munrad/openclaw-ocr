@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { CONFIG } from '../lib/config.mjs';
 
 function redisCli(args) {
-  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
   let password = CONFIG.password || process.env.REDIS_PASSWORD || '';
   if (!password) {
     try { password = readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch {}

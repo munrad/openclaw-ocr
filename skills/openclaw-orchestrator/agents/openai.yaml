@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenClaw Orchestrator"
+  short_description: "Coordinate parallel OCR-backed agent execution"
+  default_prompt: "Use $openclaw-orchestrator to break down this task, coordinate child agents, and keep OCR/Telegram status aggregated from the coordinator."

@@ -8,7 +8,7 @@ import { CONFIG } from '../lib/config.mjs';
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
 
 function redisCli(args) {
-  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
   let password = CONFIG.password || process.env.REDIS_PASSWORD || '';
   if (!password) {
     try { password = readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch {}
@@ -85,6 +85,7 @@ async function main() {
   const testAgent = `spawnbot-${Date.now()}`;
   const watcherKey = 'openclaw:task-status-watcher:last_event_id';
   const createdMessages = [];
+  const skipTelegram = process.env.OCR_INTEGRATION_SKIP_TELEGRAM === '1';
   const heartbeatKey = `openclaw:heartbeat:${testAgent}`;
   const snapshots = {
     agent: snapshotHash(`openclaw:agents:status:${testAgent}`),
@@ -147,15 +148,20 @@ async function main() {
       if (taskHash.message_id && agentHash.state === 'queued') break;
     }
 
-    assert.ok(taskHash.message_id, 'spawn should create tracker message immediately');
+    assert.ok(
+      skipTelegram ? Object.keys(taskHash).length > 0 : !!taskHash.message_id,
+      'spawn should create tracker state immediately',
+    );
     assert.deepEqual(JSON.parse(taskHash.agents || '[]'), [testAgent]);
     assert.equal(agentHash.state, 'queued');
     assert.equal(agentHash.step, 'spawned, awaiting first worker update');
     assert.equal(agentHash.progress, '0');
     assert.equal(agentHash.run_id, taskId);
-    createdMessages.push({ chatId: taskHash.chat_id || '-1003891295903', messageId: taskHash.message_id });
+    if (taskHash.message_id) {
+      createdMessages.push({ chatId: taskHash.chat_id || '-1003891295903', messageId: taskHash.message_id });
+    }
 
-    const initialMessageId = taskHash.message_id;
+    const initialMessageId = String(taskHash.message_id || '');
 
     ocr(['emit', 'agent_spawned', JSON.stringify({
       agent: testAgent,
@@ -175,7 +181,7 @@ async function main() {
 
     await sleep(1000);
     const duplicateTaskHash = hgetall(`openclaw:task-status:${taskId}`);
-    assert.equal(duplicateTaskHash.message_id, initialMessageId, 'duplicate agent_spawned must be idempotent');
+    assert.equal(String(duplicateTaskHash.message_id || ''), initialMessageId, 'duplicate agent_spawned must be idempotent');
 
     ocr(['set-status', testAgent, JSON.stringify({
       state: 'working',
@@ -193,7 +199,7 @@ async function main() {
 
     const afterFirstStatusTaskHash = hgetall(`openclaw:task-status:${taskId}`);
     const afterFirstStatusAgentHash = hgetall(`openclaw:agents:status:${testAgent}`);
-    assert.equal(afterFirstStatusTaskHash.message_id, initialMessageId, 'first worker status must reuse existing tracker');
+    assert.equal(String(afterFirstStatusTaskHash.message_id || ''), initialMessageId, 'first worker status must reuse existing tracker');
     assert.equal(afterFirstStatusAgentHash.state, 'working');
     assert.equal(afterFirstStatusAgentHash.run_id, taskId);
 
@@ -220,7 +226,7 @@ async function main() {
       if (autoIdled.state === 'idle') break;
     }
     assert.equal(hgetall(`openclaw:agents:status:${testAgent}`).state, 'idle', 'reconcile should auto-idle stale status');
-    assert.equal(hgetall(`openclaw:task-status:${taskId}`).message_id, initialMessageId, 'degraded/auto-idled lifecycle must not duplicate tracker');
+    assert.equal(String(hgetall(`openclaw:task-status:${taskId}`).message_id || ''), initialMessageId, 'degraded/auto-idled lifecycle must not duplicate tracker');
 
     await stopWatcher();
 
@@ -250,9 +256,9 @@ async function main() {
     for (let i = 0; i < 24; i++) {
       await sleep(500);
       const replayedTask = hgetall(`openclaw:task-status:${taskId}`);
-      if (replayedTask.message_id === initialMessageId) break;
+      if (String(replayedTask.message_id || '') === initialMessageId) break;
     }
-    assert.equal(hgetall(`openclaw:task-status:${taskId}`).message_id, initialMessageId, 'watcher replay/restart must stay idempotent');
+    assert.equal(String(hgetall(`openclaw:task-status:${taskId}`).message_id || ''), initialMessageId, 'watcher replay/restart must stay idempotent');
 
     await stopWatcher();
 

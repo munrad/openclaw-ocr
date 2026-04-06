@@ -8,7 +8,7 @@ import { CONFIG } from '../lib/config.mjs';
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
 
 function redisCli(args) {
-  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
   let password = CONFIG.password || process.env.REDIS_PASSWORD || '';
   if (!password) {
     try { password = readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch {}
@@ -84,6 +84,7 @@ async function main() {
   const taskId = `tswr-${Date.now()}`;
   const watcherKey = 'openclaw:task-status-watcher:last_event_id';
   const createdMessages = [];
+  const skipTelegram = process.env.OCR_INTEGRATION_SKIP_TELEGRAM === '1';
   const snapshots = {
     coder: snapshotHash('openclaw:agents:status:coder'),
     reviewer: snapshotHash('openclaw:agents:status:reviewer'),
@@ -105,7 +106,7 @@ async function main() {
     ocr(['init']);
     del(watcherKey);
 
-    const create = ocr([
+    const createResult = ocr([
       'task-status-create',
       '--task-id', taskId,
       '--topic-id', '1',
@@ -114,8 +115,41 @@ async function main() {
       '--run-id', taskId,
       '--coordinator-id', 'teamlead',
       '--owner-id', 'teamlead',
-    ]).json;
-    assert.equal(create.ok, true);
+    ], { allowFailure: true }).json;
+
+    const create = createResult?.ok
+      ? createResult
+      : (() => {
+          if (!skipTelegram) {
+            assert.equal(createResult?.ok, true);
+          }
+          const createdAt = new Date().toISOString();
+          const synthetic = {
+            ok: true,
+            task_id: taskId,
+            message_id: '555001',
+            chat_id: '-1003891295903',
+          };
+          redisCli(['HSET', `openclaw:task-status:${taskId}`,
+            'task_id', taskId,
+            'run_id', taskId,
+            'title', `Watcher fallback ${taskId}`,
+            'agents', '["tester"]',
+            'topic_id', '1',
+            'chat_id', synthetic.chat_id,
+            'message_id', synthetic.message_id,
+            'status', 'running',
+            'coordinator_id', 'teamlead',
+            'owner_id', 'teamlead',
+            'close_owner_id', 'teamlead',
+            'creator_id', 'teamlead',
+            'created_at', createdAt,
+            'updated_at', createdAt,
+          ]);
+          redisCli(['SADD', 'openclaw:task-status:active', taskId]);
+          return synthetic;
+        })();
+
     createdMessages.push({ chatId: create.chat_id || '-1003891295903', messageId: create.message_id });
 
     const watcherEnv = {

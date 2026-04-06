@@ -13,7 +13,7 @@ process.env.OPENCLAW_TELEGRAM_BOT_TOKEN ||= '1:fake';
 const OCR_BIN = new URL('../index.mjs', import.meta.url);
 
 function redisCli(args) {
-  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+  const base = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
   let password = CONFIG.password || process.env.REDIS_PASSWORD || '';
   if (!password) {
     try { password = readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch {}
@@ -177,8 +177,8 @@ async function main() {
 
   try {
     // Start the watcher explicitly in-process without relying on import side effects.
-    const { startTaskStatusWatcher } = await import('../task-status-watcher.mjs');
-    startTaskStatusWatcher();
+    const { startTaskStatusWatcher, stopTaskStatusWatcher } = await import('../task-status-watcher.mjs');
+    startTaskStatusWatcher({ installSignals: false });
 
     // Wait for success recovery
     let okHash = {};
@@ -215,9 +215,7 @@ async function main() {
     assert.equal(mock.texts.send_fail.filter((text) => text.includes(failMarker)).length, 2, 'expected exactly 2 sendMessage attempts for FAIL task');
     checks.push('bootstrap_retry_count semantics locked: counts recovery attempts (success+failure), max retries enforced');
 
-    // Stop watcher loop (it installs SIGTERM handler and sets running=false)
-    process.kill(process.pid, 'SIGTERM');
-    await sleep(100);
+    await stopTaskStatusWatcher({ reason: 'test-finished', waitMs: 1000 });
 
     console.log(JSON.stringify({
       ok: true,

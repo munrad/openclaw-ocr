@@ -9,7 +9,7 @@ const OCR_BIN = new URL('../index.mjs', import.meta.url);
 const password = CONFIG.password || process.env.REDIS_PASSWORD || (() => {
   try { return readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch { return ''; }
 })();
-const baseRedisArgs = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+const baseRedisArgs = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
 if (password) baseRedisArgs.push('-a', password);
 
 function redisCli(args) {
@@ -86,6 +86,7 @@ function deleteTelegramMessage(chatId, messageId) {
 
 async function main() {
   const qa = `teamlead-fanout-${Date.now()}`;
+  const skipTelegram = process.env.OCR_INTEGRATION_SKIP_TELEGRAM === '1';
   const workerGroup = `qa-teamlead-${Date.now()}`;
   const rootTitle = `Telegram dedupe orchestration ${qa}`;
   const trackedAgents = ['teamlead', 'coder', 'tester', 'reviewer', 'writer'];
@@ -140,7 +141,7 @@ async function main() {
       run_id: rootTaskId,
     })]);
 
-    const taskStatus = ocr([
+    const taskStatusResult = ocr([
       'task-status-create',
       '--task-id', rootTaskId,
       '--topic-id', '1',
@@ -149,8 +150,39 @@ async function main() {
       '--run-id', rootTaskId,
       '--coordinator-id', 'teamlead',
       '--owner-id', 'teamlead',
-    ]).json;
-    assert.equal(taskStatus.ok, true);
+    ], { allowFailure: true }).json;
+    const taskStatus = taskStatusResult?.ok
+      ? taskStatusResult
+      : (() => {
+          if (!skipTelegram) {
+            assert.equal(taskStatusResult?.ok, true);
+          }
+          const createdAt = new Date().toISOString();
+          const synthetic = {
+            ok: true,
+            task_id: rootTaskId,
+            message_id: '777001',
+            chat_id: '-1003891295903',
+          };
+          redisCli(['HSET', `openclaw:task-status:${rootTaskId}`,
+            'task_id', rootTaskId,
+            'run_id', rootTaskId,
+            'title', rootTitle,
+            'agents', '["coder"]',
+            'topic_id', '1',
+            'chat_id', synthetic.chat_id,
+            'message_id', synthetic.message_id,
+            'status', 'running',
+            'coordinator_id', 'teamlead',
+            'owner_id', 'teamlead',
+            'close_owner_id', 'teamlead',
+            'creator_id', 'teamlead',
+            'created_at', createdAt,
+            'updated_at', createdAt,
+          ]);
+          redisCli(['SADD', 'openclaw:task-status:active', rootTaskId]);
+          return synthetic;
+        })();
     createdMessages.push({ chatId: taskStatus.chat_id || '-1003891295903', messageId: taskStatus.message_id });
 
     watcherProc = spawn('node', [OCR_BIN.pathname, 'daemon', 'task-status'], {

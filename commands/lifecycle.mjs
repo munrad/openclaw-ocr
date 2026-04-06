@@ -10,7 +10,14 @@
  *   ocr lifecycle run <agent-id> [--run-id <id>] [--step <text>] <shell-command...>
  */
 import { output, argError } from '../lib/errors.mjs';
-import { LifecycleManager, withLifecycle, listActiveRuns, stopAllRuns } from '../lib/lifecycle.mjs';
+import {
+  LifecycleManager,
+  withLifecycle,
+  listActiveRuns,
+  listRegisteredRuns,
+  requestLifecycleStop,
+  writeTerminalStatusDirect,
+} from '../lib/lifecycle.mjs';
 
 /**
  * One-shot lifecycle: start, execute a shell command, mark completed/failed.
@@ -118,15 +125,20 @@ export async function cmdLifecycleStart(args) {
   });
 
   // Keep process alive for heartbeat. Exit on SIGINT/SIGTERM.
-  const keepAlive = () => {
-    life.stop();
+  const keepAlive = async () => {
+    await life.stop();
     process.exit(0);
   };
   process.on('SIGINT', keepAlive);
   process.on('SIGTERM', keepAlive);
 
-  // Block forever (timer.unref means process will still exit cleanly)
-  await new Promise(() => {});
+  // Wait until a local signal or a Redis-backed remote stop request ends the run.
+  const holdOpen = setInterval(() => {}, 1000);
+  try {
+    await life.waitForShutdown();
+  } finally {
+    clearInterval(holdOpen);
+  }
 }
 
 /**
@@ -134,12 +146,14 @@ export async function cmdLifecycleStart(args) {
  */
 export async function cmdLifecycleStop(args) {
   let agentId = null;
+  let runId = null;
   let status = 'completed';
   let step = '';
   let error = '';
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--status' && args[i + 1]) { status = args[++i]; }
+    if (args[i] === '--run-id' && args[i + 1]) { runId = args[++i]; }
+    else if (args[i] === '--status' && args[i + 1]) { status = args[++i]; }
     else if (args[i] === '--step' && args[i + 1]) { step = args[++i]; }
     else if (args[i] === '--error' && args[i + 1]) { error = args[++i]; }
     else if (!agentId) { agentId = args[i]; }
@@ -147,33 +161,42 @@ export async function cmdLifecycleStop(args) {
 
   if (!agentId) throw argError('lifecycle stop requires <agent-id>');
 
-  // List active runs and stop matching ones
-  const active = listActiveRuns();
-  const matching = active.filter(r => r.agentId === agentId);
+  const registeredRuns = listRegisteredRuns(agentId);
+  const matchingRuns = runId
+    ? registeredRuns.filter((run) => run.runId === runId)
+    : registeredRuns;
 
-  if (!matching.length) {
-    // No in-process run found — do a direct status write as fallback
-    const { writeStatus } = await import('../lib/lifecycle.mjs');
-    // Use a direct Redis write since LifecycleManager instance is not available
+  if (matchingRuns.length > 0) {
+    const requests = matchingRuns.map((run) => ({
+      run_id: run.runId,
+      ...requestLifecycleStop({
+        agentId,
+        runId: run.runId,
+        status,
+        step,
+        error,
+      }),
+    }));
+
     output({
       ok: true,
       agent_id: agentId,
-      message: 'No active in-process lifecycle found. Use "ocr set-status" to set terminal status directly.',
-      hint: `ocr set-status ${agentId} '{"state":"${status}","step":"${step || status}"}'`,
+      mode: 'remote_stop_requested',
+      requested: requests.length,
+      run_id: runId || undefined,
+      requests,
     });
     return;
   }
 
-  for (const run of matching) {
-    // We can't call complete/fail without the LifecycleManager instance,
-    // but we can stop the timer
-    stopAllRuns();
-  }
-
+  const direct = await writeTerminalStatusDirect({ agentId, runId, status, step, error });
   output({
     ok: true,
     agent_id: agentId,
-    stopped: matching.length,
+    mode: 'direct_terminal_write',
+    requested: 0,
+    run_id: direct.runId,
+    status: direct.status,
   });
 }
 
@@ -229,6 +252,6 @@ export async function cmdLifecycleList() {
     ok: true,
     count: active.length,
     runs: active,
-    note: active.length === 0 ? 'Shows in-process lifecycles only. Use `lifecycle run` for integrated lifecycle.' : undefined,
+    note: active.length === 0 ? 'Shows in-process lifecycles only. Use `lifecycle stop --run-id` for Redis-backed cross-process shutdown.' : undefined,
   });
 }

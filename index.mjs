@@ -262,12 +262,13 @@ function printHelp() {
     '                                                             — execute command with full lifecycle (start/heartbeat/complete/fail)',
     '  lifecycle update <agent-id> <json>                      — update status of active lifecycle run',
     '  lifecycle beat <agent-id>                               — send single heartbeat',
-    '  lifecycle stop <agent-id> [--status completed|failed]    — stop lifecycle run',
+    '  lifecycle stop <agent-id> [--run-id <id>] [--status completed|failed]',
+    '                                                             — stop lifecycle run (cross-process via Redis registration)',
     '  lifecycle list                                          — list active in-process lifecycle runs',
     '',
     'Exit codes: 0=ok, 1=business error, 2=infra error, 3=arg error',
     '',
-    'Env: REDIS_HOST, REDIS_PORT, REDIS_PASSWORD',
+    'Env: REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_DB',
     'Secret: /run/secrets/redis_password',
   ].join('\n');
   process.stdout.write(help + '\n');

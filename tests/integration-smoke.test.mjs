@@ -9,7 +9,7 @@ const OCR_BIN = new URL('../index.mjs', import.meta.url);
 const password = CONFIG.password || process.env.REDIS_PASSWORD || (() => {
   try { return readFileSync('/run/secrets/redis_password', 'utf8').trim(); } catch { return ''; }
 })();
-const baseRedisArgs = ['-h', CONFIG.host, '-p', String(CONFIG.port), '--no-auth-warning'];
+const baseRedisArgs = ['-h', CONFIG.host, '-p', String(CONFIG.port), '-n', String(CONFIG.db || 0), '--no-auth-warning'];
 if (password) baseRedisArgs.push('-a', password);
 
 function redisCli(args) {
@@ -96,6 +96,7 @@ const created = {
 };
 
 async function main() {
+  const skipTelegram = process.env.OCR_INTEGRATION_SKIP_TELEGRAM === '1';
   const qa = `qa-${Date.now()}`;
   const summary = { qa, checks: [], anomalies: [] };
 
@@ -142,6 +143,7 @@ async function main() {
 
   // pipeline normal completion
   const pipelineTask = `qa-pipeline-${qa}`;
+  created.taskStatusIds.push(pipelineTask);
   const startedPipeline = ocr(['start-pipeline', '--task-id', pipelineTask, '--template', 'documentation', '--context', JSON.stringify({ qa })]).json;
   created.pipelineIds.push(startedPipeline.pipeline_id);
   assert.equal(startedPipeline.current_agent, 'writer');
@@ -159,6 +161,7 @@ async function main() {
 
   // pipeline loop/escalation
   const loopPipelineTask = `qa-code-review-${qa}`;
+  created.taskStatusIds.push(loopPipelineTask);
   const startedLoopPipeline = ocr(['start-pipeline', '--task-id', loopPipelineTask, '--template', 'code_review']).json;
   created.pipelineIds.push(startedLoopPipeline.pipeline_id);
   const adv1 = ocr(['advance-pipeline', '--pipeline-id', startedLoopPipeline.pipeline_id, '--result', JSON.stringify({ verdict: 'fail', output: 'review issues' })]).json;
@@ -204,9 +207,12 @@ async function main() {
   const tally1 = ocr(['roundtable-tally', rt.rt_id]).json;
   assert.equal(tally1.ok, true);
   ocr(['roundtable-contribute', rt.rt_id, '--agent', 'tester', '--round', '1', '--summary', `tester says ${qa}`, '--disagrees_with', 'coder']);
-  assert.equal(exists(`openclaw:roundtable:${rt.rt_id}`), false);
-  assert.equal(exists(`openclaw:roundtable:${rt.rt_id}:rounds`), false);
-  summary.checks.push('roundtable auto-cleanup');
+  assert.equal(exists(`openclaw:roundtable:${rt.rt_id}`), true);
+  assert.equal(exists(`openclaw:roundtable:${rt.rt_id}:rounds`), true);
+  assert.equal(redisCli(['HGET', `openclaw:roundtable:${rt.rt_id}`, 'status']), 'completed');
+  assert.ok(Number(redisCli(['TTL', `openclaw:roundtable:${rt.rt_id}`])) > 0);
+  assert.ok(Number(redisCli(['TTL', `openclaw:roundtable:${rt.rt_id}:rounds`])) > 0);
+  summary.checks.push('roundtable auto-cleanup retains completed state behind TTL');
 
   // bugs workflow
   const bug = ocr(['bug-report', 'P2', `QA smoke bug ${qa}`, '--reporter', 'tester']).json;
@@ -223,160 +229,162 @@ async function main() {
   summary.checks.push('bugs');
 
   // ─── Task-Status v3 Contract Tests ──────────────────────────────────────────
+  if (skipTelegram) {
+    summary.checks.push('task-status integration skipped (OCR_INTEGRATION_SKIP_TELEGRAM=1)');
+  } else {
+    // 1. Idempotent create
+    const tsTaskId = `ts-${qa}`;
+    created.taskStatusIds.push(tsTaskId);
+    const tsCreate1 = ocr([
+      'task-status-create',
+      '--task-id', tsTaskId,
+      '--topic-id', '1',
+      '--title', `QA task ${qa}`,
+      '--agents', 'tester',
+      '--run-id', tsTaskId,
+      '--coordinator-id', 'teamlead',
+      '--owner-id', 'coder',
+    ]).json;
+    assert.equal(tsCreate1.ok, true);
+    assert.ok(tsCreate1.message_id, 'create should return message_id');
+    created.messages.push({ chatId: tsCreate1.chat_id || '-1003891295903', messageId: tsCreate1.message_id });
 
-  // 1. Idempotent create
-  const tsTaskId = `ts-${qa}`;
-  created.taskStatusIds.push(tsTaskId);
-  const tsCreate1 = ocr([
-    'task-status-create',
-    '--task-id', tsTaskId,
-    '--topic-id', '1',
-    '--title', `QA task ${qa}`,
-    '--agents', 'tester',
-    '--run-id', tsTaskId,
-    '--coordinator-id', 'teamlead',
-    '--owner-id', 'coder',
-  ]).json;
-  assert.equal(tsCreate1.ok, true);
-  assert.ok(tsCreate1.message_id, 'create should return message_id');
-  created.messages.push({ chatId: tsCreate1.chat_id || '-1003891295903', messageId: tsCreate1.message_id });
+    // Second create with same task_id → must return same message_id (idempotent)
+    const tsCreate2 = ocr([
+      'task-status-create',
+      '--task-id', tsTaskId,
+      '--topic-id', '1',
+      '--title', `QA task ${qa} duplicate`,
+      '--agents', 'tester',
+      '--coordinator-id', 'teamlead',
+    ]).json;
+    assert.equal(tsCreate2.ok, true);
+    assert.equal(tsCreate2.message_id, tsCreate1.message_id, 'idempotent create must return same message_id');
+    assert.equal(tsCreate2.idempotent, true);
+    summary.checks.push('task-status: idempotent create');
 
-  // Second create with same task_id → must return same message_id (idempotent)
-  const tsCreate2 = ocr([
-    'task-status-create',
-    '--task-id', tsTaskId,
-    '--topic-id', '1',
-    '--title', `QA task ${qa} duplicate`,
-    '--agents', 'tester',
-    '--coordinator-id', 'teamlead',
-  ]).json;
-  assert.equal(tsCreate2.ok, true);
-  assert.equal(tsCreate2.message_id, tsCreate1.message_id, 'idempotent create must return same message_id');
-  assert.equal(tsCreate2.idempotent, true);
-  summary.checks.push('task-status: idempotent create');
+    // 2. Immutable binding: coordinator/owner unchanged after create
+    const tsHash1 = hgetall(`openclaw:task-status:${tsTaskId}`);
+    assert.equal(tsHash1.coordinator_id, 'teamlead');
+    assert.equal(tsHash1.owner_id, 'coder');
+    summary.checks.push('task-status: immutable binding');
 
-  // 2. Immutable binding: coordinator/owner unchanged after create
-  const tsHash1 = hgetall(`openclaw:task-status:${tsTaskId}`);
-  assert.equal(tsHash1.coordinator_id, 'teamlead');
-  assert.equal(tsHash1.owner_id, 'coder');
-  summary.checks.push('task-status: immutable binding');
+    // 3. Agent join
+    const joinResult = ocr(['task-status-join', '--task-id', tsTaskId, '--agent-id', 'coder']).json;
+    assert.equal(joinResult.ok, true);
+    assert.ok(joinResult.agents.includes('tester'));
+    assert.ok(joinResult.agents.includes('coder'));
 
-  // 3. Agent join
-  const joinResult = ocr(['task-status-join', '--task-id', tsTaskId, '--agent-id', 'coder']).json;
-  assert.equal(joinResult.ok, true);
-  assert.ok(joinResult.agents.includes('tester'));
-  assert.ok(joinResult.agents.includes('coder'));
+    // Duplicate join is safe (idempotent)
+    const joinResult2 = ocr(['task-status-join', '--task-id', tsTaskId, '--agent-id', 'coder']).json;
+    assert.equal(joinResult2.ok, true);
+    const joinAgents = JSON.parse(hgetall(`openclaw:task-status:${tsTaskId}`).agents || '[]');
+    assert.equal(joinAgents.filter(a => a === 'coder').length, 1, 'no duplicate agents after re-join');
+    summary.checks.push('task-status: agent join');
 
-  // Duplicate join is safe (idempotent)
-  const joinResult2 = ocr(['task-status-join', '--task-id', tsTaskId, '--agent-id', 'coder']).json;
-  assert.equal(joinResult2.ok, true);
-  const joinAgents = JSON.parse(hgetall(`openclaw:task-status:${tsTaskId}`).agents || '[]');
-  assert.equal(joinAgents.filter(a => a === 'coder').length, 1, 'no duplicate agents after re-join');
-  summary.checks.push('task-status: agent join');
+    // 4. Join non-existent task
+    const joinFail = ocr(['task-status-join', '--task-id', `ts-nonexistent-${qa}`, '--agent-id', 'coder'], { allowFailure: true }).json;
+    assert.equal(joinFail.ok, false);
+    assert.equal(joinFail.error, 'task_not_found');
+    summary.checks.push('task-status: join non-existent fails');
 
-  // 4. Join non-existent task
-  const joinFail = ocr(['task-status-join', '--task-id', `ts-nonexistent-${qa}`, '--agent-id', 'coder'], { allowFailure: true }).json;
-  assert.equal(joinFail.ok, false);
-  assert.equal(joinFail.error, 'task_not_found');
-  summary.checks.push('task-status: join non-existent fails');
+    // 5. Unauthorized close (tester is not coordinator or owner)
+    const closeDenied = ocr(['task-status-close', '--task-id', tsTaskId, '--result', 'success', '--actor-id', 'tester'], { allowFailure: true }).json;
+    assert.equal(closeDenied.ok, false);
+    assert.equal(closeDenied.error, 'not_closer');
+    summary.checks.push('task-status: unauthorized close rejected');
 
-  // 5. Unauthorized close (tester is not coordinator or owner)
-  const closeDenied = ocr(['task-status-close', '--task-id', tsTaskId, '--result', 'success', '--actor-id', 'tester'], { allowFailure: true }).json;
-  assert.equal(closeDenied.ok, false);
-  assert.equal(closeDenied.error, 'not_closer');
-  summary.checks.push('task-status: unauthorized close rejected');
+    // 6. Close without actor-id → arg_error
+    const closeNoActor = ocr(['task-status-close', '--task-id', tsTaskId, '--result', 'success'], { allowFailure: true });
+    assert.notEqual(closeNoActor.code, 0, 'close without actor-id should fail');
+    summary.checks.push('task-status: close requires actor-id');
 
-  // 6. Close without actor-id → arg_error
-  const closeNoActor = ocr(['task-status-close', '--task-id', tsTaskId, '--result', 'success'], { allowFailure: true });
-  assert.notEqual(closeNoActor.code, 0, 'close without actor-id should fail');
-  summary.checks.push('task-status: close requires actor-id');
+    // 7. Manual update
+    const manualUpdate = ocr(['task-status-update', '--task-id', tsTaskId]).json;
+    assert.equal(manualUpdate.ok, true);
+    summary.checks.push('task-status: manual update');
 
-  // 7. Manual update
-  const manualUpdate = ocr(['task-status-update', '--task-id', tsTaskId]).json;
-  assert.equal(manualUpdate.ok, true);
-  summary.checks.push('task-status: manual update');
+    // 8. Authorized close (teamlead is coordinator)
+    const closeOk = ocr(['task-status-close', '--task-id', tsTaskId, '--result', 'success', '--actor-id', 'teamlead']).json;
+    assert.equal(closeOk.ok, true);
+    const tsClosedHash = hgetall(`openclaw:task-status:${tsTaskId}`);
+    assert.equal(tsClosedHash.status, 'completed');
+    assert.equal(tsClosedHash.closed_by, 'teamlead');
+    assert.ok(!smembers('openclaw:task-status:active').includes(tsTaskId));
+    summary.checks.push('task-status: authorized close');
 
-  // 8. Authorized close (teamlead is coordinator)
-  const closeOk = ocr(['task-status-close', '--task-id', tsTaskId, '--result', 'success', '--actor-id', 'teamlead']).json;
-  assert.equal(closeOk.ok, true);
-  const tsClosedHash = hgetall(`openclaw:task-status:${tsTaskId}`);
-  assert.equal(tsClosedHash.status, 'completed');
-  assert.equal(tsClosedHash.closed_by, 'teamlead');
-  assert.ok(!smembers('openclaw:task-status:active').includes(tsTaskId));
-  summary.checks.push('task-status: authorized close');
+    // 9. Join closed task → rejected
+    const joinClosed = ocr(['task-status-join', '--task-id', tsTaskId, '--agent-id', 'reviewer'], { allowFailure: true }).json;
+    assert.equal(joinClosed.ok, false);
+    assert.equal(joinClosed.error, 'task_closed');
+    summary.checks.push('task-status: join closed task fails');
 
-  // 9. Join closed task → rejected
-  const joinClosed = ocr(['task-status-join', '--task-id', tsTaskId, '--agent-id', 'reviewer'], { allowFailure: true }).json;
-  assert.equal(joinClosed.ok, false);
-  assert.equal(joinClosed.error, 'task_closed');
-  summary.checks.push('task-status: join closed task fails');
+    // 10. Watcher: append-only (no auto-create, auto-joins agents by run_id)
+    const watcherTaskId = `ts-watcher-${qa}`;
+    created.taskStatusIds.push(watcherTaskId);
 
-  // 10. Watcher: append-only (no auto-create, auto-joins agents by run_id)
-  const watcherTaskId = `ts-watcher-${qa}`;
-  created.taskStatusIds.push(watcherTaskId);
+    // Create task first (coordinator creates)
+    const watcherCreate = ocr([
+      'task-status-create',
+      '--task-id', watcherTaskId,
+      '--topic-id', '1',
+      '--title', `Watcher test ${qa}`,
+      '--agents', 'tester',
+      '--coordinator-id', 'teamlead',
+      '--owner-id', 'teamlead',
+    ]).json;
+    assert.equal(watcherCreate.ok, true);
+    created.messages.push({ chatId: watcherCreate.chat_id || '-1003891295903', messageId: watcherCreate.message_id });
 
-  // Create task first (coordinator creates)
-  const watcherCreate = ocr([
-    'task-status-create',
-    '--task-id', watcherTaskId,
-    '--topic-id', '1',
-    '--title', `Watcher test ${qa}`,
-    '--agents', 'tester',
-    '--coordinator-id', 'teamlead',
-    '--owner-id', 'teamlead',
-  ]).json;
-  assert.equal(watcherCreate.ok, true);
-  created.messages.push({ chatId: watcherCreate.chat_id || '-1003891295903', messageId: watcherCreate.message_id });
+    const watcherProc = spawn('node', [OCR_BIN.pathname, 'daemon', 'task-status'], {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    watcherProc.stdout.on('data', () => {});
+    watcherProc.stderr.on('data', () => {});
+    let watcherStopped = false;
+    const stopWatcher = async () => {
+      if (watcherStopped) return;
+      watcherStopped = true;
+      watcherProc.kill('SIGTERM');
+      await new Promise((resolve) => watcherProc.once('close', resolve));
+    };
 
-  const watcherProc = spawn('node', [OCR_BIN.pathname, 'daemon', 'task-status'], {
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let watcherLogs = '';
-  watcherProc.stdout.on('data', (chunk) => { watcherLogs += String(chunk); });
-  watcherProc.stderr.on('data', (chunk) => { watcherLogs += String(chunk); });
-  let watcherStopped = false;
-  const stopWatcher = async () => {
-    if (watcherStopped) return;
-    watcherStopped = true;
-    watcherProc.kill('SIGTERM');
-    await new Promise((resolve) => watcherProc.once('close', resolve));
-  };
+    try {
+      await sleep(1500);
 
-  try {
-    await sleep(1500);
+      // Agent reports status with run_id matching the task → watcher should auto-join
+      ocr(['set-status', 'coder', JSON.stringify({ state: 'working', step: `watcher join ${qa}`, progress: 20, run_id: watcherTaskId })]);
 
-    // Agent reports status with run_id matching the task → watcher should auto-join
-    ocr(['set-status', 'coder', JSON.stringify({ state: 'working', step: `watcher join ${qa}`, progress: 20, run_id: watcherTaskId })]);
+      let watcherAgents = [];
+      for (let i = 0; i < 15; i++) {
+        await sleep(500);
+        const wHash = hgetall(`openclaw:task-status:${watcherTaskId}`);
+        watcherAgents = JSON.parse(wHash.agents || '[]');
+        if (watcherAgents.includes('coder')) break;
+      }
+      assert.ok(watcherAgents.includes('tester'), 'original agent still present');
+      assert.ok(watcherAgents.includes('coder'), 'watcher auto-joined coder by run_id');
 
-    let watcherAgents = [];
-    for (let i = 0; i < 15; i++) {
-      await sleep(500);
-      const wHash = hgetall(`openclaw:task-status:${watcherTaskId}`);
-      watcherAgents = JSON.parse(wHash.agents || '[]');
-      if (watcherAgents.includes('coder')) break;
+      // Watcher must NOT create messages for unknown run_ids
+      const unknownTaskId = `ts-unknown-${qa}`;
+      created.taskStatusIds.push(unknownTaskId);
+      ocr(['set-status', 'reviewer', JSON.stringify({ state: 'working', step: `unknown ${qa}`, progress: 5, run_id: unknownTaskId })]);
+      await sleep(3000);
+      const unknownHash = hgetall(`openclaw:task-status:${unknownTaskId}`);
+      assert.ok(!unknownHash.message_id, 'watcher must NOT auto-create for unknown task');
+
+      // Status query still works
+      const statusQuery = ocr(['status-query', 'tester']).json;
+      assert.equal(statusQuery.ok, true);
+    } finally {
+      await stopWatcher();
     }
-    assert.ok(watcherAgents.includes('tester'), 'original agent still present');
-    assert.ok(watcherAgents.includes('coder'), 'watcher auto-joined coder by run_id');
 
-    // Watcher must NOT create messages for unknown run_ids
-    const unknownTaskId = `ts-unknown-${qa}`;
-    created.taskStatusIds.push(unknownTaskId);
-    ocr(['set-status', 'reviewer', JSON.stringify({ state: 'working', step: `unknown ${qa}`, progress: 5, run_id: unknownTaskId })]);
-    await sleep(3000);
-    const unknownHash = hgetall(`openclaw:task-status:${unknownTaskId}`);
-    assert.ok(!unknownHash.message_id, 'watcher must NOT auto-create for unknown task');
-
-    // Status query still works
-    const statusQuery = ocr(['status-query', 'tester']).json;
-    assert.equal(statusQuery.ok, true);
-  } finally {
-    await stopWatcher();
+    // Close watcher test task
+    ocr(['task-status-close', '--task-id', watcherTaskId, '--result', 'success', '--actor-id', 'teamlead']);
+    summary.checks.push('task-status: watcher append-only + no auto-create');
   }
-
-  // Close watcher test task
-  ocr(['task-status-close', '--task-id', watcherTaskId, '--result', 'success', '--actor-id', 'teamlead']);
-  summary.checks.push('task-status: watcher append-only + no auto-create');
 
   // gc stale/orphan cleanup
   const oldIso = '2000-01-01T00:00:00.000Z';

@@ -50,6 +50,11 @@ const DEBOUNCE_MS = envNumber('OCR_TASK_STATUS_WATCHER_DEBOUNCE_MS', 3000);
 const PERIODIC_REFRESH_MS = envNumber('OCR_TASK_STATUS_WATCHER_PERIODIC_REFRESH_MS', 30_000);
 const XREAD_BLOCK_MS = envNumber('OCR_TASK_STATUS_WATCHER_XREAD_BLOCK_MS', 5000);
 const STREAM_SPAWN_BOOTSTRAP_MAX_AGE_MS = envNumber('OCR_TASK_STATUS_WATCHER_STREAM_SPAWN_BOOTSTRAP_MAX_AGE_MS', 120000);
+const QUIET_AFTER_NO_CHANGE_MS = envNumber(
+  'OCR_TASK_STATUS_WATCHER_QUIET_AFTER_NO_CHANGE_MS',
+  Math.max(PERIODIC_REFRESH_MS * 3, 90_000),
+);
+const QUIET_AFTER_TG_ERROR_MS = envNumber('OCR_TASK_STATUS_WATCHER_QUIET_AFTER_TG_ERROR_MS', 60_000);
 const WATCHER_LAST_EVENT_ID_KEY = 'openclaw:task-status-watcher:last_event_id';
 const IMMUTABLE_BINDING_FIELDS = ['coordinator_id', 'owner_id', 'close_owner_id', 'creator_id'];
 
@@ -66,7 +71,9 @@ let running = true;
 let lastEventId = '0-0';
 let debounceTimer = null;
 let pubsubSubscription = null;
+let activeXreadProc = null;
 const pendingTaskIds = new Set();
+const taskRefreshMeta = new Map();
 let lastPeriodicRefresh = Date.now();
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
@@ -168,13 +175,67 @@ export function shouldBootstrapSpawnFromStream(eventData = {}, eventMeta = {}) {
   return (Date.now() - eventTsMs) <= STREAM_SPAWN_BOOTSTRAP_MAX_AGE_MS;
 }
 
+export function resolveRefreshBackoffMs(outcome, details = {}) {
+  if (outcome === 'no_change') return QUIET_AFTER_NO_CHANGE_MS;
+  if (outcome === 'rate_limited') {
+    const retryAfterMs = Number(details.retryAfterMs);
+    return Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : 0;
+  }
+  if (outcome === 'tg_error' || outcome === 'delivery_suppressed') {
+    return QUIET_AFTER_TG_ERROR_MS;
+  }
+  return 0;
+}
+
+export function shouldSchedulePeriodicTaskRefresh(meta = {}, nowMs = Date.now()) {
+  const quietUntilMs = Number(meta.quietUntilMs || 0);
+  return !Number.isFinite(quietUntilMs) || quietUntilMs <= nowMs;
+}
+
+function recordTaskRefreshOutcome(taskId, outcome, details = {}, nowMs = Date.now()) {
+  const meta = taskRefreshMeta.get(taskId) || {};
+  const backoffMs = resolveRefreshBackoffMs(outcome, details);
+  meta.lastOutcome = outcome;
+  meta.lastAttemptAt = nowMs;
+  meta.quietUntilMs = backoffMs > 0 ? nowMs + backoffMs : 0;
+  taskRefreshMeta.set(taskId, meta);
+  return meta;
+}
+
+function enqueueTaskUpdate(taskId, { reason = 'signal', force = false, nowMs = Date.now() } = {}) {
+  if (!running || !taskId) return false;
+
+  const meta = taskRefreshMeta.get(taskId) || {};
+  if (!force && reason === 'periodic' && !shouldSchedulePeriodicTaskRefresh(meta, nowMs)) {
+    return false;
+  }
+
+  meta.lastQueuedAt = nowMs;
+  meta.lastQueueReason = reason;
+  if (reason !== 'periodic') meta.quietUntilMs = 0;
+  taskRefreshMeta.set(taskId, meta);
+
+  pendingTaskIds.add(taskId);
+  scheduleDebouncedUpdate();
+  return true;
+}
+
 // ─── XREAD Block ─────────────────────────────────────────────────────────────
 
 function xreadBlock(streamKey, lastId, blockMs) {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (activeXreadProc === proc) activeXreadProc = null;
+      clearTimeout(timer);
+      resolve(value);
+    };
     const args = [
       '-h', CONFIG.host,
       '-p', CONFIG.port,
+      '-n', String(CONFIG.db || 0),
       '--no-auth-warning',
     ];
     if (CONFIG.password) args.push('-a', CONFIG.password);
@@ -182,26 +243,25 @@ function xreadBlock(streamKey, lastId, blockMs) {
       'STREAMS', streamKey, lastId);
 
     const proc = spawn('redis-cli', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    activeXreadProc = proc;
     let stdout = '';
 
     proc.stdout.on('data', (d) => { stdout += d; });
 
     const timer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      resolve([]);
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      finish([]);
     }, blockMs + 10_000);
 
     proc.on('close', () => {
-      clearTimeout(timer);
       const raw = stdout.trim();
-      if (!raw || raw === '(nil)') { resolve([]); return; }
-      try { resolve(parseXreadRaw(raw)); }
-      catch { resolve([]); }
+      if (!raw || raw === '(nil)') { finish([]); return; }
+      try { finish(parseXreadRaw(raw)); }
+      catch { finish([]); }
     });
 
     proc.on('error', () => {
-      clearTimeout(timer);
-      resolve([]);
+      finish([]);
     });
   });
 }
@@ -335,8 +395,11 @@ async function recoverStaleBootstrapPending() {
 
 async function updateTask(taskId) {
   const taskData = getTaskData(taskId);
-  if (!taskData.message_id) return;
-  if (taskData.status === 'completed' || taskData.status === 'failed') return;
+  if (!taskData.message_id) return { outcome: 'missing_message' };
+  if (taskData.status === 'completed' || taskData.status === 'failed') {
+    taskRefreshMeta.delete(taskId);
+    return { outcome: 'terminal' };
+  }
 
   const agents = parseJson(taskData.agents, []);
   const agentStatuses = getAgentStatuses(agents);
@@ -351,7 +414,10 @@ async function updateTask(taskId) {
       }));
     }
     log(`Skipped task ${taskId}: ${plan.reason}`);
-    return;
+    return {
+      outcome: plan.reason === 'delivery_suppressed' ? 'delivery_suppressed' : plan.reason,
+      retryAfterMs: plan.retry_after_ms,
+    };
   }
 
   const editBody = {
@@ -371,6 +437,7 @@ async function updateTask(taskId) {
       delivery_state: 'confirmed',
     }));
     log(`Updated task ${taskId}`);
+    return { outcome: 'updated' };
   } else if (tgResult.description?.includes('message is not modified')) {
     persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
       ...taskData,
@@ -378,6 +445,7 @@ async function updateTask(taskId) {
       delivery_state: 'confirmed',
     }));
     log(`Skipped no-op task refresh ${taskId}`);
+    return { outcome: 'no_change' };
   } else {
     persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
       ...taskData,
@@ -385,25 +453,38 @@ async function updateTask(taskId) {
       delivery_error: tgResult.description || 'unknown telegram error',
     }));
     log(`TG edit failed for ${taskId}: ${tgResult.description || 'unknown error'}`);
+    return { outcome: 'tg_error' };
   }
 }
 
 // ─── Signal Handling ─────────────────────────────────────────────────────────
 
 function scheduleDebouncedUpdate() {
+  if (!running || pendingTaskIds.size === 0) return;
   if (debounceTimer) return;
   debounceTimer = setTimeout(async () => {
     debounceTimer = null;
+    if (!running) return;
     const ids = [...pendingTaskIds];
     pendingTaskIds.clear();
     for (const taskId of ids) {
-      try { await updateTask(taskId); }
-      catch (err) { log(`Error updating task ${taskId}: ${err.message}`); }
+      if (!running) break;
+      try {
+        const result = await updateTask(taskId);
+        recordTaskRefreshOutcome(taskId, result?.outcome || 'updated', {
+          retryAfterMs: result?.retryAfterMs,
+        });
+      } catch (err) {
+        recordTaskRefreshOutcome(taskId, 'tg_error');
+        log(`Error updating task ${taskId}: ${err.message}`);
+      }
     }
   }, DEBOUNCE_MS);
+  if (debounceTimer.unref) debounceTimer.unref();
 }
 
 async function handleStatusSignal(agentId, eventData = {}, source = 'unknown', eventType = 'agent_status_changed', eventMeta = {}) {
+  if (!running) return;
   if (!agentId) return;
 
   const normalizedRunId = String(eventData.run_id || eventData.task_id || '').trim();
@@ -415,7 +496,7 @@ async function handleStatusSignal(agentId, eventData = {}, source = 'unknown', e
         agent_id: agentId,
       });
       if (bootstrapped?.ok) {
-        pendingTaskIds.add(normalizedRunId);
+        enqueueTaskUpdate(normalizedRunId, { reason: 'bootstrap' });
         log(`Bootstrap ${normalizedRunId} via ${source}:${eventType} (created=${bootstrapped.created ? 'yes' : 'no'})`);
       }
     } else {
@@ -432,16 +513,12 @@ async function handleStatusSignal(agentId, eventData = {}, source = 'unknown', e
 
   if (source === 'stream') {
     const joined = tryAutoJoin(agentId, normalizedRunId);
-    for (const taskId of joined) pendingTaskIds.add(taskId);
+    for (const taskId of joined) enqueueTaskUpdate(taskId, { reason: 'join' });
   }
 
   const resolvedTaskId = resolveTaskIdForAgent(agentId, eventData);
   if (resolvedTaskId) {
-    pendingTaskIds.add(resolvedTaskId);
-  }
-
-  if (pendingTaskIds.size > 0) {
-    scheduleDebouncedUpdate();
+    enqueueTaskUpdate(resolvedTaskId, { reason: source === 'pubsub' ? 'pubsub' : 'signal' });
   }
 }
 
@@ -515,12 +592,17 @@ async function mainLoop() {
 
       if (Date.now() - lastPeriodicRefresh > PERIODIC_REFRESH_MS) {
         lastPeriodicRefresh = Date.now();
-        for (const taskId of getActiveTaskIds()) {
-          pendingTaskIds.add(taskId);
+        let queuedCount = 0;
+        const activeTaskIds = getActiveTaskIds();
+        for (const taskId of activeTaskIds) {
+          if (enqueueTaskUpdate(taskId, { reason: 'periodic' })) {
+            queuedCount += 1;
+          }
         }
-        if (pendingTaskIds.size > 0) {
-          log('Periodic refresh: scheduling safety-net update');
-          scheduleDebouncedUpdate();
+        if (queuedCount > 0) {
+          log(`Periodic refresh: queued ${queuedCount} task(s)`);
+        } else if (activeTaskIds.length > 0) {
+          log(`Periodic refresh: quiet window active for ${activeTaskIds.length} task(s)`);
         }
         // S2: recover stale bootstrap_pending trackers
         try { await recoverStaleBootstrapPending(); }
@@ -531,20 +613,28 @@ async function mainLoop() {
       await new Promise(r => setTimeout(r, 5000));
     }
   }
+
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  pendingTaskIds.clear();
+  taskRefreshMeta.clear();
+  activeXreadProc = null;
+  pubsubSubscription = null;
+  log('Stopped task-status-watcher');
 }
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 
 function installSignalHandlers() {
   process.on('SIGINT', () => {
-    running = false;
-    try { pubsubSubscription?.close(); } catch { /* ignore */ }
     log('SIGINT received');
+    void stopTaskStatusWatcher({ reason: 'SIGINT' });
   });
   process.on('SIGTERM', () => {
-    running = false;
-    try { pubsubSubscription?.close(); } catch { /* ignore */ }
     log('SIGTERM received');
+    void stopTaskStatusWatcher({ reason: 'SIGTERM' });
   });
 }
 
@@ -552,13 +642,48 @@ let watcherStartPromise = null;
 
 export function startTaskStatusWatcher({ installSignals = true } = {}) {
   if (!watcherStartPromise) {
+    running = true;
+    lastPeriodicRefresh = Date.now();
     if (installSignals) installSignalHandlers();
-    watcherStartPromise = mainLoop().catch((err) => {
+    watcherStartPromise = mainLoop().finally(() => {
       watcherStartPromise = null;
-      throw err;
     });
   }
   return watcherStartPromise;
+}
+
+export async function stopTaskStatusWatcher({ reason = 'stop', waitMs = 5000 } = {}) {
+  if (!running && !watcherStartPromise) return;
+
+  running = false;
+  pendingTaskIds.clear();
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  try { pubsubSubscription?.close(); } catch { /* ignore */ }
+  pubsubSubscription = null;
+  try { activeXreadProc?.kill('SIGTERM'); } catch { /* ignore */ }
+
+  const currentPromise = watcherStartPromise;
+  if (!currentPromise) {
+    log(`Watcher stop requested (${reason})`);
+    return;
+  }
+
+  let timeoutId = null;
+  try {
+    await Promise.race([
+      currentPromise.catch(() => {}),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(resolve, waitMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+
+  log(`Watcher stop requested (${reason})`);
 }
 
 const isMainModule = process.argv[1]

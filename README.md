@@ -14,11 +14,11 @@ Archived from [munrad/agent](https://github.com/munrad/agent) (`services/opencla
 index.mjs              CLI entry point
 commands/              Command implementations (tasks, agents, pipelines, roundtable, etc.)
 lib/                   Supporting libraries (Redis, config, retry, circuit-breaker, schemas)
-tests/                 Test suite (19 files)
+tests/                 Test suite
 status-watchdog.mjs    Agent status reconciliation daemon
 task-status-watcher.mjs  Task-scoped status tracking daemon
 lifecycle-daemon.mjs   Automated heartbeat keeper
-skills/openclaw-orchestrator/  Coordinator skill that uses OCR as backend
+skills/openclaw-orchestrator/  Coordinator skill + UI metadata for OCR-backed orchestration
 scripts/               Event dispatcher, auto-router, event mappings
 docs/                  CLI reference and test cases
 ```
@@ -38,3 +38,12 @@ ocr --help
 
 For the coordinator-facing skill contract, see
 [`skills/openclaw-orchestrator/SKILL.md`](skills/openclaw-orchestrator/SKILL.md).
+
+For isolated Redis-backed integration runs, use:
+
+```bash
+node scripts/run-redis-tests-sequential.mjs
+```
+
+The runner assigns a separate `REDIS_DB` to each test file, runs them sequentially,
+checks Redis hygiene on the same DB, and flushes that DB after each file.
