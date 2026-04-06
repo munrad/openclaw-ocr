@@ -46,7 +46,7 @@ export async function cmdLifecycleRun(args) {
   const { execSync } = await import('node:child_process');
 
   await withLifecycle(opts, async (life) => {
-    life.working(`exec: ${cmd.slice(0, 80)}`, 10);
+    await life.working(`exec: ${cmd.slice(0, 80)}`, 10);
 
     try {
       const result = execSync(cmd, {
@@ -54,7 +54,7 @@ export async function cmdLifecycleRun(args) {
         timeout: 600_000,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      life.working(`exec done`, 90);
+      await life.working(`exec done`, 90);
 
       // Truncate output for status step
       const outputPreview = result.slice(0, 200).replace(/\n/g, ' ').trim();
@@ -195,7 +195,7 @@ export async function cmdLifecycleUpdate(args) {
   const patch = JSON.parse(jsonArg);
   patch.run_id = patch.run_id || temp.runId;
   patch.run_epoch = patch.run_epoch || temp.runEpoch;
-  temp.update(patch);
+  await temp.update(patch);
 
   output({
     ok: true,

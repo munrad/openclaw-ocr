@@ -21,10 +21,10 @@ import { redis, redisRaw, parseHgetall, parseJson, withLock } from '../lib/redis
 import { KEYS } from '../lib/schema.mjs';
 import { output, argError } from '../lib/errors.mjs';
 import { writeAgentStatus } from '../lib/status-reconcile.mjs';
+import { classifyTelegramFailure, planTaskStatusSync, taskStatusSignature } from '../lib/task-status-sync.mjs';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const TG_TOKEN = process.env.OPENCLAW_TELEGRAM_BOT_TOKEN;
 export const DEFAULT_CHAT_ID = '-1003891295903';
 export const DEFAULT_TASK_TOPIC_ID = '1';
 const TASK_STATUS_TTL_SEC = '86400';
@@ -51,12 +51,21 @@ function parseArgs(args) {
 
 // ─── Telegram API ────────────────────────────────────────────────────────────
 
+export function getTelegramToken() {
+  return String(process.env.OPENCLAW_TELEGRAM_BOT_TOKEN || '').trim();
+}
+
 function tgApi(method, body, timeoutMs = taskStatusTgTimeoutMs()) {
   return new Promise((resolve, reject) => {
+    const token = getTelegramToken();
+    if (!token) {
+      reject(new Error('OPENCLAW_TELEGRAM_BOT_TOKEN not set'));
+      return;
+    }
     const data = JSON.stringify(body);
     const req = https.request({
       hostname: 'api.telegram.org',
-      path: `/bot${TG_TOKEN}/${method}`,
+      path: `/bot${token}/${method}`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -352,6 +361,9 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
     };
   }
 
+  const fallbackDeliveryState = created.delivery_state
+    || (created.error === 'telegram_token_missing' ? 'suppressed' : 'pending');
+
   const payload = preserveImmutableBindings(existing, {
     ...(Object.keys(existing).length > 0 ? existing : createTaskPayload(normalizedTaskId, {
       title: normalizedTitle,
@@ -370,7 +382,9 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
     topic_id: existing.topic_id || normalizedTopicId,
     agents: JSON.stringify(nextAgents),
     updated_at: new Date().toISOString(),
-    bootstrap_pending: '1',
+    delivery_state: fallbackDeliveryState,
+    delivery_error: created.description || created.error || 'tracker_persisted_without_message',
+    bootstrap_pending: fallbackDeliveryState === 'pending' ? '1' : '0',
   });
   persistTaskStatus(normalizedTaskId, payload);
 
@@ -380,8 +394,9 @@ export async function ensureTaskStatusTracker(taskId, input = {}) {
     created: false,
     joined: normalizedAgentId ? true : false,
     message_id: payload.message_id || null,
-    bootstrap_pending: true,
-    fallback_reason: created.error || 'tracker_persisted_without_message',
+    bootstrap_pending: payload.bootstrap_pending === '1',
+    delivery_state: payload.delivery_state,
+    fallback_reason: created.error || payload.delivery_error || 'tracker_persisted_without_message',
   };
 }
 
@@ -409,6 +424,8 @@ function createTaskPayload(taskId, input = {}) {
     creator_id: creatorId,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    status_owner: 'coordinator',
+    projection_target: 'telegram',
   };
 }
 
@@ -460,7 +477,7 @@ export function persistTaskStatus(taskId, taskData) {
 // ─── Create (idempotent) ─────────────────────────────────────────────────────
 
 export async function createTaskStatusMessage(taskId, input = {}) {
-  if (!TG_TOKEN) {
+  if (!getTelegramToken()) {
     return { ok: false, error: 'telegram_token_missing', description: 'OPENCLAW_TELEGRAM_BOT_TOKEN not set' };
   }
 
@@ -502,11 +519,20 @@ export async function createTaskStatusMessage(taskId, input = {}) {
 
     const sendResult = await tgApiSafe('sendMessage', sendBody);
     if (!sendResult.ok) {
-      return { ok: false, error: 'tg_send_failed', description: sendResult.description };
+      const deliveryState = classifyTelegramFailure(sendResult);
+      return {
+        ok: false,
+        error: deliveryState === 'unconfirmed' ? 'tg_delivery_unconfirmed' : 'tg_send_failed',
+        delivery_state: deliveryState,
+        description: sendResult.description,
+      };
     }
 
     const messageId = String(sendResult.result.message_id);
     taskData.message_id = messageId;
+    taskData.rendered_signature = taskStatusSignature(text);
+    taskData.last_telegram_edit_at = new Date().toISOString();
+    taskData.delivery_state = 'confirmed';
     persistTaskStatus(taskId, taskData);
 
     try {
@@ -623,7 +649,7 @@ export async function cmdTaskStatusCreate(args) {
   if (!title) throw argError('task-status-create requires --title');
   if (!agentsStr) throw argError('task-status-create requires --agents');
   if (!coordinatorId) throw argError('task-status-create requires --coordinator-id');
-  if (!TG_TOKEN) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
+  if (!getTelegramToken()) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
 
   const agents = uniqueAgents(agentsStr.split(','));
   if (agents.length === 0) throw argError('--agents must list at least one agent');
@@ -655,6 +681,7 @@ export async function cmdTaskStatusCreate(args) {
     owner_id: result.task?.owner_id || ownerId,
     close_owner_id: result.task?.close_owner_id || closeOwnerId,
     creator_id: result.task?.creator_id || creatorId,
+    delivery_state: result.task?.delivery_state || 'confirmed',
     idempotent: result.idempotent || false,
   });
 }
@@ -701,9 +728,10 @@ export async function cmdTaskStatusJoin(args) {
 export async function cmdTaskStatusUpdate(args) {
   const opts = parseArgs(args);
   const taskId = opts.task_id;
+  const force = opts.force === true || opts.force === 'true';
 
   if (!taskId) throw argError('task-status-update requires --task-id');
-  if (!TG_TOKEN) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
+  if (!getTelegramToken()) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
 
   const taskData = getTaskData(taskId);
   if (!taskData.message_id) {
@@ -719,6 +747,27 @@ export async function cmdTaskStatusUpdate(args) {
   const agents = parseJson(taskData.agents, []);
   const agentStatuses = getAgentStatuses(agents);
   const text = renderTaskStatus(taskData, agentStatuses);
+  const plan = planTaskStatusSync(taskData, text, { force });
+
+  if (!plan.shouldSend) {
+    if (plan.reason === 'no_change' && !taskData.rendered_signature) {
+      persistTaskStatus(taskId, {
+        ...taskData,
+        rendered_signature: taskStatusSignature(text),
+        delivery_state: 'confirmed',
+      });
+    }
+    output({
+      ok: true,
+      updated: false,
+      tg_ok: false,
+      modified: false,
+      skipped: true,
+      reason: plan.reason,
+      retry_after_ms: plan.retry_after_ms,
+    });
+    return;
+  }
 
   const editBody = {
     chat_id: taskData.chat_id || DEFAULT_CHAT_ID,
@@ -728,9 +777,29 @@ export async function cmdTaskStatusUpdate(args) {
   };
 
   const editResult = await tgApiSafe('editMessageText', editBody);
+  if (editResult.ok) {
+    persistTaskStatus(taskId, {
+      ...taskData,
+      rendered_signature: plan.nextSignature || taskStatusSignature(text),
+      last_telegram_edit_at: new Date().toISOString(),
+      delivery_state: 'confirmed',
+    });
+  } else if (editResult.description?.includes('message is not modified')) {
+    persistTaskStatus(taskId, {
+      ...taskData,
+      rendered_signature: plan.nextSignature || taskStatusSignature(text),
+      delivery_state: 'confirmed',
+    });
+  } else {
+    persistTaskStatus(taskId, {
+      ...taskData,
+      delivery_state: classifyTelegramFailure(editResult),
+      delivery_error: editResult.description || 'unknown telegram error',
+    });
+  }
   output({
     ok: true,
-    updated: true,
+    updated: Boolean(editResult.ok),
     tg_ok: editResult.ok,
     modified: Boolean(editResult.ok),
     skipped: Boolean(editResult.description?.includes('message is not modified')),
@@ -749,7 +818,7 @@ export async function cmdTaskStatusClose(args) {
 
   if (!taskId) throw argError('task-status-close requires --task-id');
   if (!actorId) throw argError('task-status-close requires --actor-id');
-  if (!TG_TOKEN) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
+  if (!getTelegramToken()) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
 
   const taskData = getTaskData(taskId);
   if (!taskData.message_id) {
@@ -790,6 +859,9 @@ export async function cmdTaskStatusClose(args) {
   };
 
   const editResult = await tgApiSafe('editMessageText', editBody);
+  const closeDeliveryState = editResult.ok || editResult.description?.includes('message is not modified')
+    ? 'confirmed'
+    : classifyTelegramFailure(editResult);
 
   persistTaskStatus(taskId, {
     ...taskData,
@@ -797,6 +869,9 @@ export async function cmdTaskStatusClose(args) {
     closed_at: new Date().toISOString(),
     closed_by: actorId,
     updated_at: new Date().toISOString(),
+    rendered_signature: taskStatusSignature(text),
+    delivery_state: closeDeliveryState,
+    ...(editResult.ok ? { last_telegram_edit_at: new Date().toISOString() } : {}),
   });
   redis('EXPIRE', KEYS.taskStatus(taskId), '3600'); // short TTL on close (1h)
 

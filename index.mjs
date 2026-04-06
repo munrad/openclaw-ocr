@@ -244,7 +244,7 @@ function printHelp() {
     'Task-Scoped Status (live status in topic):',
     '  task-status-create --task-id <id> --topic-id <id> --title "..." --agents coder,tester --coordinator-id <id> [--owner-id <id>] [--chat-id <id>]',
     '  task-status-join   --task-id <id> --agent-id <agent>       — join existing task (append-only)',
-    '  task-status-update --task-id <id>                           — refresh status message',
+    '  task-status-update --task-id <id> [--force]                 — refresh status message',
     '  task-status-close  --task-id <id> --result success|fail --actor-id <id>  — finalize (coordinator/owner only)',
     '',
     'Garbage Collection:',

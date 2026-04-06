@@ -12,6 +12,7 @@
     "task-status-watcher.mjs",
     "lifecycle-daemon.mjs",
     "commands/",
-    "lib/"
+    "lib/",
+    "skills/"
   ]
 }

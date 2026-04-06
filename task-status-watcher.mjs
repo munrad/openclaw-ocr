@@ -27,6 +27,7 @@ import {
   ensureTaskStatusTracker,
   getAgentStatuses,
   getTaskData,
+  getTelegramToken,
   persistTaskStatus,
   renderTaskStatus,
   tgApiSafe,
@@ -34,6 +35,7 @@ import {
 } from './commands/task-status.mjs';
 import { isPubSubEnabled, subscribeStatusNotify } from './lib/pubsub.mjs';
 import { writeDaemonHeartbeat } from './lib/daemon-heartbeat.mjs';
+import { classifyTelegramFailure, planTaskStatusSync, taskStatusSignature } from './lib/task-status-sync.mjs';
 
 function envNumber(name, fallback) {
   const raw = process.env[name];
@@ -108,20 +110,6 @@ function getAgentStatus(agentId) {
   }
 }
 
-function buildAgentIndex() {
-  const index = new Map(); // agentId -> Set<taskId>
-  const taskIds = getActiveTaskIds();
-  for (const taskId of taskIds) {
-    const taskData = getTaskData(taskId);
-    const agents = parseJson(taskData.agents, []);
-    for (const agentId of agents) {
-      if (!index.has(agentId)) index.set(agentId, new Set());
-      index.get(agentId).add(taskId);
-    }
-  }
-  return index;
-}
-
 function uniqueAgents(agents) {
   return [...new Set((agents || []).map(a => String(a || '').trim()).filter(Boolean))];
 }
@@ -138,6 +126,14 @@ function preserveWatcherBindings(taskId, nextTaskData = {}) {
   }
 
   return mergedTaskData;
+}
+
+function resolveTaskIdForAgent(agentId, eventData = {}) {
+  const runId = String(eventData.run_id || eventData.task_id || '').trim()
+    || String(getAgentStatus(agentId).run_id || '').trim();
+  if (!runId) return '';
+  const taskData = getTaskData(runId);
+  return Object.keys(taskData).length > 0 ? runId : '';
 }
 
 export function parseEventTimestampMs(eventMeta = {}, eventData = {}) {
@@ -241,11 +237,11 @@ function parseXreadRaw(raw) {
 
 // ─── Auto-Join: append agent to task if run_id matches ───────────────────────
 
-function tryAutoJoin(agentId) {
-  const status = getAgentStatus(agentId);
-  if (!Object.keys(status).length) return [];
+function tryAutoJoin(agentId, runIdHint = '') {
+  const status = runIdHint ? {} : getAgentStatus(agentId);
+  if (!runIdHint && !Object.keys(status).length) return [];
 
-  const runId = String(status.run_id || '').trim();
+  const runId = String(runIdHint || status.run_id || '').trim();
   if (!runId) return [];
 
   const taskData = getTaskData(runId);
@@ -314,13 +310,20 @@ async function recoverStaleBootstrapPending() {
         message_id: messageId,
         bootstrap_pending: '0',
         bootstrap_retry_count: String(retryCount + 1),
+        rendered_signature: taskStatusSignature(text),
+        last_telegram_edit_at: new Date().toISOString(),
+        delivery_state: 'confirmed',
         updated_at: new Date().toISOString(),
       }));
       log(`bootstrap_pending recovery: ${taskId} recovered, message_id=${messageId}`);
     } else {
+      const deliveryState = classifyTelegramFailure(sendResult);
       persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
         ...taskData,
+        bootstrap_pending: '1',
         bootstrap_retry_count: String(retryCount + 1),
+        delivery_state: deliveryState,
+        delivery_error: sendResult.description || 'unknown telegram error',
         updated_at: new Date().toISOString(),
       }));
       log(`bootstrap_pending recovery: ${taskId} TG sendMessage failed (attempt ${retryCount + 1}): ${sendResult.description || 'unknown'}`);
@@ -334,13 +337,22 @@ async function updateTask(taskId) {
   const taskData = getTaskData(taskId);
   if (!taskData.message_id) return;
   if (taskData.status === 'completed' || taskData.status === 'failed') return;
-  // TODO: phantom detection (delivery_unconfirmed) deferred to a future phase.
-  // The delivery_status field is never set today; when implemented, sendMessage
-  // results should be verified and delivery_unconfirmed set on ambiguous outcomes.
 
   const agents = parseJson(taskData.agents, []);
   const agentStatuses = getAgentStatuses(agents);
   const text = renderTaskStatus(taskData, agentStatuses);
+  const plan = planTaskStatusSync(taskData, text);
+  if (!plan.shouldSend) {
+    if (plan.reason === 'no_change' && !taskData.rendered_signature) {
+      persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
+        ...taskData,
+        rendered_signature: taskStatusSignature(text),
+        delivery_state: 'confirmed',
+      }));
+    }
+    log(`Skipped task ${taskId}: ${plan.reason}`);
+    return;
+  }
 
   const editBody = {
     chat_id: taskData.chat_id || DEFAULT_CHAT_ID,
@@ -352,10 +364,26 @@ async function updateTask(taskId) {
   const tgResult = await tgApiSafe('editMessageText', editBody);
 
   if (tgResult.ok) {
+    persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
+      ...taskData,
+      rendered_signature: plan.nextSignature || taskStatusSignature(text),
+      last_telegram_edit_at: new Date().toISOString(),
+      delivery_state: 'confirmed',
+    }));
     log(`Updated task ${taskId}`);
   } else if (tgResult.description?.includes('message is not modified')) {
+    persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
+      ...taskData,
+      rendered_signature: plan.nextSignature || taskStatusSignature(text),
+      delivery_state: 'confirmed',
+    }));
     log(`Skipped no-op task refresh ${taskId}`);
   } else {
+    persistTaskStatus(taskId, preserveWatcherBindings(taskId, {
+      ...taskData,
+      delivery_state: classifyTelegramFailure(tgResult),
+      delivery_error: tgResult.description || 'unknown telegram error',
+    }));
     log(`TG edit failed for ${taskId}: ${tgResult.description || 'unknown error'}`);
   }
 }
@@ -379,8 +407,8 @@ async function handleStatusSignal(agentId, eventData = {}, source = 'unknown', e
   if (!agentId) return;
 
   const normalizedRunId = String(eventData.run_id || eventData.task_id || '').trim();
-  if (eventType === 'agent_spawned' && normalizedRunId) {
-    const allowBootstrap = source !== 'stream' || shouldBootstrapSpawnFromStream(eventData, eventMeta);
+  if (source === 'stream' && eventType === 'agent_spawned' && normalizedRunId) {
+    const allowBootstrap = shouldBootstrapSpawnFromStream(eventData, eventMeta);
     if (allowBootstrap) {
       const bootstrapped = await ensureTaskStatusTracker(normalizedRunId, {
         ...eventData,
@@ -402,16 +430,14 @@ async function handleStatusSignal(agentId, eventData = {}, source = 'unknown', e
     }
   }
 
-  // Auto-join: if agent's run_id matches an active task, append agent
-  const joined = tryAutoJoin(agentId);
-  for (const taskId of joined) pendingTaskIds.add(taskId);
+  if (source === 'stream') {
+    const joined = tryAutoJoin(agentId, normalizedRunId);
+    for (const taskId of joined) pendingTaskIds.add(taskId);
+  }
 
-  // Also schedule updates for tasks this agent is already a member of
-  const agentIndex = buildAgentIndex();
-  if (agentIndex.has(agentId)) {
-    for (const taskId of agentIndex.get(agentId)) {
-      pendingTaskIds.add(taskId);
-    }
+  const resolvedTaskId = resolveTaskIdForAgent(agentId, eventData);
+  if (resolvedTaskId) {
+    pendingTaskIds.add(resolvedTaskId);
   }
 
   if (pendingTaskIds.size > 0) {
@@ -442,7 +468,7 @@ function initPubSub() {
 async function mainLoop() {
   log('Starting task-status-watcher (v3 strict-only, append+update only)...');
 
-  if (!process.env.OPENCLAW_TELEGRAM_BOT_TOKEN) {
+  if (!getTelegramToken()) {
     log('ERROR: OPENCLAW_TELEGRAM_BOT_TOKEN not set');
     process.exit(1);
   }

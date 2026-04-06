@@ -1,6 +1,10 @@
 # ocr — CLI-справочник
 
-> `ocr` (openclaw-redis) — CLI для координации мультиагентной системы через Redis Streams.
+> `ocr` (openclaw-redis) — CLI/backend для координации мультиагентной системы через Redis Streams.
+
+`ocr` теперь предполагается как backend-слой для coordinator skill: skill хранит
+канонический live-status у себя, а OCR держит durable events, agent snapshots,
+task trackers и Telegram projection.
 
 ```
 ocr <command> [args...]
@@ -738,6 +742,8 @@ Scoped status messages в Telegram — привязка задач к агент
 
 Создаёт Telegram-сообщение со статусом задачи. Идемпотентно — повторный вызов с тем же `task-id` возвращает существующий `message_id`.
 
+В coordinator-skill режиме только главный координатор должен вызывать `task-status-create/update/close`. Дочерние агенты должны ограничиваться `lifecycle`, `set-status` и `emit`.
+
 ```bash
 ocr task-status-create --task-id ts-feature-123 --topic-id 1 --title "Новая фича" --agents coder,tester --coordinator-id teamlead
 # {"ok":true,"message_id":12345,"task_id":"ts-feature-123"}
@@ -752,9 +758,10 @@ ocr task-status-join --task-id ts-feature-123 --agent-id reviewer
 # {"ok":true,"agents":["coder","tester","reviewer"]}
 ```
 
-### `task-status-update --task-id <id>`
+### `task-status-update --task-id <id> [--force]`
 
 Принудительно обновляет Telegram-сообщение с текущими статусами агентов.
+По умолчанию OCR пропускает no-op и слишком частые edits; `--force` обходит этот локальный guard.
 
 ```bash
 ocr task-status-update --task-id ts-feature-123
@@ -863,7 +870,7 @@ ocr gc
 
 ### `daemon task-status`
 
-Watcher для task-status messages. Слушает Redis Pub/Sub, при его отключении переключается на `openclaw:events:stream`, обновляет Telegram-сообщения с прогрессом задач и делает auto-join агентов по `run_id` match.
+Watcher для task-status messages. Pub/Sub используется только как wake-up fast-path, durable source of truth остаётся `openclaw:events:stream`. Watcher обновляет Telegram-сообщения с прогрессом задач и делает auto-join агентов по `run_id` match.
 
 **Контракт:** append-only. Обычно не создаёт и не закрывает задачи — только обновляет и join'ит. **Исключение:** может bootstrap/create tracker при событии `agent_spawned` с OCR/task-status context (через `ensureTaskStatusTracker(...)`).
 
