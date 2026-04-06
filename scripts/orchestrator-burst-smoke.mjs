@@ -167,7 +167,7 @@ function main() {
       tracker: entry.tracker,
     })),
     rejected,
-    active_snapshot,
+    active_snapshot: activeSnapshot,
     cleanup,
   }, null, 2)}\n`);
 }

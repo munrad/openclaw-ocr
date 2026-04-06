@@ -221,8 +221,18 @@ test('get-orchestration returns trackerless snapshots with child result and stat
 
     const coderClaim = ocr(['claim-task', 'coder', group]).json;
     const testerClaim = ocr(['claim-task', 'tester', group]).json;
-    ocr(['set-status', 'coder', '{"state":"completed","step":"implemented fix","progress":100}']);
-    ocr(['set-status', 'tester', '{"state":"failed","step":"regression detected","progress":80}']);
+    ocr(['set-status', 'coder', JSON.stringify({
+      state: 'completed',
+      step: 'implemented fix',
+      progress: 100,
+      run_id: created.run_id,
+    })]);
+    ocr(['set-status', 'tester', JSON.stringify({
+      state: 'failed',
+      step: 'regression detected',
+      progress: 80,
+      run_id: created.run_id,
+    })]);
     ocr(['complete-task', coderClaim.task_id, '{"agent":"coder","summary":"implementation done"}']);
     ocr(['fail-task', testerClaim.task_id, 'regression detected']);
 
@@ -240,6 +250,74 @@ test('get-orchestration returns trackerless snapshots with child result and stat
       try { redisCli(['SREM', 'openclaw:orchestrations:active', rootTaskId]); } catch {}
     }
     try { redisCli(['XGROUP', 'DESTROY', 'openclaw:tasks:stream', group]); } catch {}
+  }
+});
+
+test('get-orchestration isolates child statuses to the orchestration run id', () => {
+  const coder = `isolated-coder-${Date.now()}`;
+  const tester = `isolated-tester-${Date.now()}`;
+  let rootTaskId = null;
+  let childTaskIds = [];
+
+  try {
+    ocr(['set-status', coder, JSON.stringify({
+      state: 'working',
+      step: 'foreign coder work',
+      progress: 41,
+      run_id: 'foreign-run',
+    })]);
+    ocr(['set-status', tester, JSON.stringify({
+      state: 'testing',
+      step: 'foreign tester work',
+      progress: 73,
+      run_id: 'foreign-run',
+    })]);
+
+    const created = ocr([
+      'orchestrate-fanout',
+      '--goal', 'Isolate statuses per orchestration run',
+      '--agents', `${coder},${tester}`,
+      '--coordinator-id', 'teamlead',
+      '--title', 'Run isolation QA',
+    ]).json;
+
+    assert.equal(created.ok, true);
+    rootTaskId = created.task_id;
+    childTaskIds = created.children.map((child) => child.task_id);
+
+    const expectedTitles = new Map(created.children.map((child) => [child.agent, child.title]));
+    const snapshot = ocr(['get-orchestration', '--task-id', rootTaskId]).json;
+    assert.equal(snapshot.ok, true);
+    assert.equal(snapshot.orchestration.child_status_summary.queued, 2);
+
+    const statuses = new Map(snapshot.orchestration.child_statuses.map((entry) => [entry.agent, entry]));
+    const coderStatus = statuses.get(coder);
+    const testerStatus = statuses.get(tester);
+
+    assert.ok(coderStatus, 'coder child status must exist');
+    assert.ok(testerStatus, 'tester child status must exist');
+
+    assert.equal(coderStatus.state, 'queued');
+    assert.equal(testerStatus.state, 'queued');
+    assert.equal(coderStatus.run_id, created.run_id);
+    assert.equal(testerStatus.run_id, created.run_id);
+    assert.equal(coderStatus.step, expectedTitles.get(coder));
+    assert.equal(testerStatus.step, expectedTitles.get(tester));
+    assert.notEqual(coderStatus.step, 'foreign coder work');
+    assert.notEqual(testerStatus.step, 'foreign tester work');
+  } finally {
+    const cleanupKeys = [
+      `openclaw:agent_status:${coder}`,
+      `openclaw:agent_status:${tester}`,
+    ];
+    if (rootTaskId) {
+      cleanupKeys.push(`openclaw:orchestration:${rootTaskId}`);
+      try { redisCli(['SREM', 'openclaw:orchestrations:active', rootTaskId]); } catch {}
+    }
+    for (const childTaskId of childTaskIds) {
+      cleanupKeys.push(`openclaw:task:${childTaskId}`, `openclaw:task:result:${childTaskId}`);
+    }
+    try { redisCli(['DEL', ...cleanupKeys]); } catch {}
   }
 });
 
@@ -401,9 +479,9 @@ test('close-orchestration closes the root and suppresses tracker projection when
   redisCli(['SADD', 'openclaw:orchestrations:active', taskId]);
 
   const env = { ...process.env };
-  delete env.OPENCLAW_TELEGRAM_BOT_TOKEN;
-  delete env.OPENCLAW_TELEGRAM_CHAT_ID;
-  delete env.OPENCLAW_TELEGRAM_TOPIC_ID;
+  env.OPENCLAW_TELEGRAM_BOT_TOKEN = ' ';
+  env.OPENCLAW_TELEGRAM_CHAT_ID = ' ';
+  env.OPENCLAW_TELEGRAM_TOPIC_ID = ' ';
 
   const closed = ocr([
     'close-orchestration',

@@ -283,8 +283,20 @@ function summarizeChildResults(children = []) {
   return { results, summary };
 }
 
-function summarizeAgentStates(agentIds = []) {
-  const agentStatuses = getAgentStatuses(agentIds);
+function summarizeAgentStates(agentIds = [], options = {}) {
+  const childSpecs = new Map(
+    (options.children || [])
+      .filter((child) => child?.agent)
+      .map((child) => [String(child.agent).trim(), child]),
+  );
+  const agentStatuses = getAgentStatuses(agentIds, {
+    expected_run_id: options.expected_run_id || options.expectedRunId,
+    fallback_state: 'queued',
+    fallback_step: (agentId) => {
+      const child = childSpecs.get(String(agentId || '').trim());
+      return String(child?.title || 'queued by coordinator').trim() || 'queued by coordinator';
+    },
+  });
   const summary = {};
   const statuses = agentIds.map((agentId) => {
     const status = agentStatuses.get(agentId) || {};
@@ -317,7 +329,10 @@ function buildOrchestrationSnapshot(taskId) {
 
   const tracker = parseTrackerRecord(getTaskData(taskId));
   const childResults = summarizeChildResults(record.created_children);
-  const childStatuses = summarizeAgentStates(record.child_agents);
+  const childStatuses = summarizeAgentStates(record.child_agents, {
+    expected_run_id: record.run_id,
+    children: record.created_children,
+  });
   const activeIndexed = redis('SISMEMBER', KEYS.orchestrationsActive, taskId) === '1';
 
   return {

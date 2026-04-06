@@ -554,7 +554,7 @@ export async function createTaskStatusMessage(taskId, input = {}) {
     }
 
     const taskData = createTaskPayload(taskId, { ...input, agents });
-    const agentStatuses = getAgentStatuses(agents);
+    const agentStatuses = getTaskScopedAgentStatuses(taskData, agents);
     const text = renderTaskStatus(taskData, agentStatuses);
 
     const sendBody = {
@@ -649,18 +649,54 @@ export function renderTaskStatus(taskData, agentStatuses, closeResult) {
 
 // ─── Get Agent Statuses ──────────────────────────────────────────────────────
 
-export function getAgentStatuses(agentIds) {
+function buildFallbackAgentStatus(agentId, options = {}) {
+  const fallbackState = String(options.fallback_state || 'queued').trim() || 'queued';
+  const fallbackStep = typeof options.fallback_step === 'function'
+    ? String(options.fallback_step(agentId) || '').trim()
+    : String(options.fallback_step || '').trim();
+  const expectedRunId = String(options.expected_run_id || options.expectedRunId || '').trim();
+
+  return {
+    agent: agentId,
+    state: fallbackState,
+    step: fallbackStep || 'queued, awaiting matching run status',
+    progress: '0',
+    ...(expectedRunId ? { run_id: expectedRunId } : {}),
+    source: 'task_scoped_fallback',
+  };
+}
+
+export function getAgentStatuses(agentIds, options = {}) {
   const statuses = new Map();
+  const expectedRunId = String(options.expected_run_id || options.expectedRunId || '').trim();
+  const includeFallback = options.include_fallback !== false;
+
   for (const agentId of uniqueAgents(agentIds)) {
     try {
       const raw = redisRaw(['HGETALL', KEYS.agentStatus(agentId)]);
       const status = parseHgetall(raw);
-      if (Object.keys(status).length > 0) {
+      const statusRunId = String(status.run_id || '').trim();
+
+      if (Object.keys(status).length > 0 && (!expectedRunId || (statusRunId && statusRunId === expectedRunId))) {
         statuses.set(agentId, status);
+        continue;
+      }
+
+      if (expectedRunId && includeFallback) {
+        statuses.set(agentId, buildFallbackAgentStatus(agentId, options));
       }
     } catch { /* skip */ }
   }
   return statuses;
+}
+
+function getTaskScopedAgentStatuses(taskData, agentIds, options = {}) {
+  return getAgentStatuses(agentIds, {
+    expected_run_id: taskData?.run_id,
+    fallback_state: options.fallback_state || 'queued',
+    fallback_step: options.fallback_step || 'queued, awaiting matching run status',
+    include_fallback: options.include_fallback,
+  });
 }
 
 // ─── Get Task Data ───────────────────────────────────────────────────────────
@@ -790,7 +826,7 @@ export async function cmdTaskStatusUpdate(args) {
   }
 
   const agents = parseJson(taskData.agents, []);
-  const agentStatuses = getAgentStatuses(agents);
+  const agentStatuses = getTaskScopedAgentStatuses(taskData, agents);
   const text = renderTaskStatus(taskData, agentStatuses);
   const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
   if (!chatId) {
@@ -901,7 +937,7 @@ export async function closeTaskStatusTracker(taskId, input = {}) {
   }
 
   const agents = parseJson(taskData.agents, []);
-  const agentStatuses = getAgentStatuses(agents);
+  const agentStatuses = getTaskScopedAgentStatuses(taskData, agents);
   const text = renderTaskStatus(taskData, agentStatuses, closeResult);
   const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
 
