@@ -12,7 +12,7 @@ ocr <command> [args...]
 
 **Exit codes:** `0` — ok, `1` — business error, `2` — infra error (Redis недоступен), `3` — arg error (неверные аргументы).
 
-**Env:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`, `OPENCLAW_TELEGRAM_BOT_TOKEN`, `OPENCLAW_TELEGRAM_CHAT_ID`, `OPENCLAW_TELEGRAM_TOPIC_ID`, `OPENCLAW_COORDINATOR_ID`.
+**Env:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`, `OPENCLAW_TELEGRAM_BOT_TOKEN`, `OPENCLAW_TELEGRAM_CHAT_ID`, `OPENCLAW_TELEGRAM_TOPIC_ID`, `OPENCLAW_COORDINATOR_ID`, `OPENCLAW_MAX_FANOUT_CHILDREN`, `OPENCLAW_MAX_ACTIVE_ORCHESTRATIONS`.
 
 **Install model:** OCR source baked into `openclaw` image из `services/openclaw/scripts/multiagent/ocr/`, но `npm install -g` вызывается только в `entrypoint`. Reinstall происходит только если hash image-baked source изменился.
 
@@ -332,7 +332,8 @@ ocr route-task '{"text":"упал nginx, 502 ошибки","source":"telegram"}'
 Coordinator-owned helper for the skill/runtime layer. It persists one root
 orchestration record in `openclaw:orchestration:<task_id>`, optionally creates
 one task-status tracker, and fans out child tasks with shared `run_id` /
-`parent_run_id` metadata.
+`parent_run_id` metadata. Active roots are indexed in
+`openclaw:orchestrations:active`.
 
 ```bash
 ocr orchestrate-fanout --goal "Fix parser bug and verify the patch" \
@@ -379,6 +380,50 @@ want OCR to materialize the fan-out in one command.
 This command is a fan-out materializer, not a full planner. It does not decide
 how many agents to spawn, which subtasks to invent, or when to rebalance the
 plan under load; those decisions remain in the coordinator skill/runtime.
+
+Runtime guards:
+
+- `OPENCLAW_MAX_FANOUT_CHILDREN` (default `8`) rejects oversized single-root fan-out plans.
+- `OPENCLAW_MAX_ACTIVE_ORCHESTRATIONS` (default `10`) rejects new roots when the active orchestration index is full.
+
+### `get-orchestration --task-id <id>`
+
+Возвращает root orchestration snapshot: сам hash, tracker snapshot, child task
+results и child agent statuses.
+
+```bash
+ocr get-orchestration --task-id parser-hotfix
+# {"ok":true,"task_id":"parser-hotfix","orchestration":{"status":"active","phase":"fanout_completed","children":[...],"child_result_summary":{"done":1,"failed":0,"pending":1,"unknown":0},"child_status_summary":{"completed":1,"queued":1}}}
+```
+
+### `list-orchestrations [--status active|completed|failed|all] [--limit N]`
+
+Operator view для root orchestration records. По умолчанию показывает active roots.
+
+```bash
+ocr list-orchestrations --status active --limit 20
+# {"ok":true,"status":"active","count":2,"orchestrations":[{"task_id":"...","done_children":1,"pending_children":1,"failed_children":0,...}]}
+```
+
+### `close-orchestration --task-id <id> --actor-id <id> [--result success|fail] [--summary <text>] [--force true] [--skip-tracker-close true]`
+
+Finalizes a root orchestration record and removes it from
+`openclaw:orchestrations:active`. If a task-status tracker exists, OCR attempts
+to close it in a degraded-safe mode so missing Telegram credentials do not
+block orchestration shutdown.
+
+```bash
+ocr close-orchestration --task-id parser-hotfix --actor-id teamlead --result fail --summary "manual recovery close"
+# {"ok":true,"closed":true,"task_id":"parser-hotfix","result":"fail","tracker_close":{"ok":true,"projection_skipped":true,...}}
+```
+
+Safety contract:
+
+- without `--force true`, OCR rejects close when child tasks are still `pending`/`unknown`
+- without `--force true`, OCR rejects `--result success` while child failures are still present
+
+`--skip-tracker-close true` is for explicit manual recovery only; normal
+coordinator paths should let OCR try to close the shared tracker.
 
 ---
 
@@ -818,6 +863,7 @@ Scoped status messages в Telegram — привязка задач к агент
 В coordinator-runtime режиме user-visible task обычно имеет:
 
 - один root orchestration record в `openclaw:orchestration:<task_id>`
+- один active-root index entry в `openclaw:orchestrations:active` пока orchestration жива
 - один coordinator-owned tracker в `openclaw:task-status:<task_id>`
 - несколько child tasks с общим `run_id` и `parent_run_id`
 
@@ -1003,6 +1049,7 @@ ocr reconcile-statuses --auto-idle-ms 60000
 | `openclaw:pipelines:active` | Set | — | Active pipelines index |
 | `openclaw:pipeline:by-task:<id>` | String | 7d | Task → pipeline mapping |
 | `openclaw:orchestration:<task_id>` | Hash | 7d | Root coordinator orchestration record |
+| `openclaw:orchestrations:active` | Set | — | Active orchestration roots index |
 | `openclaw:task-status:<id>` | Hash | 24h | Task-scoped status |
 | `openclaw:task-status:active` | Set | — | Active task-statuses index |
 | `openclaw:task-status-watcher:last_event_id` | String | — | Checkpoint XREAD fallback для watcher |
@@ -1029,8 +1076,10 @@ ocr reconcile-statuses --auto-idle-ms 60000
 ### Coordinator Runtime
 
 - `ocr orchestrate-fanout` materializes a ready coordinator plan into Redis.
+- `ocr get-orchestration`, `ocr list-orchestrations`, and `ocr close-orchestration` are the operator/recovery surface for root orchestrations.
 - Canonical planner state still lives in the coordinator skill/runtime, not in Redis.
 - `OPENCLAW_COORDINATOR_ID` is only a default ownership binding source for coordinator-owned commands.
+- Default safety limits are conservative on purpose: `OPENCLAW_MAX_FANOUT_CHILDREN=8`, `OPENCLAW_MAX_ACTIVE_ORCHESTRATIONS=10`.
 
 ### Roundtable Auto-Cleanup
 
@@ -1097,7 +1146,7 @@ docker exec -it $(docker ps -q -f name=agent_openclaw) sh -c \
 | `routing-dashboard.test.mjs` | Route-task, set/get-status, heartbeat, dashboard |
 | `routing-status-guards.test.mjs` | Busy-primary fallback, roundtable recommendation, stale resurrection guard, epoch fence |
 | `coordinator-bindings.test.mjs` | Ownership bindings and `OPENCLAW_COORDINATOR_ID` defaults |
-| `orchestrator-runtime.test.mjs` | `orchestrate-fanout`, root orchestration record, explicit tracker ownership |
+| `orchestrator-runtime.test.mjs` | `orchestrate-fanout`, root orchestration record, fan-out limits, inspect/list/close semantics, explicit tracker ownership |
 | `task-status-watcher-fallback-resume.test.mjs` | Task-status watcher restart, XREAD fallback, resume from last_event_id, no duplicate Telegram message |
 | `teamlead-fanout-e2e.test.mjs` | Root task on teamlead, fan-out to coder/tester/reviewer/writer, shared run_id, watcher auto-join, root close |
 | `redis-hygiene.test.mjs` | Meta-тест: проверка отсутствия артефактов после тестов |

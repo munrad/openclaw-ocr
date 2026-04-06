@@ -41,6 +41,8 @@ ocr --help
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`
 - `OPENCLAW_TELEGRAM_BOT_TOKEN`, `OPENCLAW_TELEGRAM_CHAT_ID`, `OPENCLAW_TELEGRAM_TOPIC_ID`
 - `OPENCLAW_COORDINATOR_ID` for a default coordinator/ownership binding when a coordinator command does not pass `--coordinator-id`
+- `OPENCLAW_MAX_FANOUT_CHILDREN` to cap one `orchestrate-fanout` root before OCR rejects it
+- `OPENCLAW_MAX_ACTIVE_ORCHESTRATIONS` to cap concurrently active root orchestrations in `openclaw:orchestrations:active`
 
 ## Install The Coordinator Skill
 
@@ -103,6 +105,22 @@ coordinator-owned task-status tracker for the whole task.
 Enable the tracker explicitly with `--create-tracker true`, or pass explicit
 chat/topic runtime inputs through the command/spec.
 
+Operator surfaces:
+
+```bash
+ocr get-orchestration --task-id <root-task-id>
+ocr list-orchestrations --status active
+ocr close-orchestration --task-id <root-task-id> --actor-id teamlead --result fail --summary "manual recovery close"
+```
+
+`get-orchestration` returns the root record, tracker snapshot, child task
+results, and child agent statuses. `close-orchestration` finalizes the root
+record, removes it from the active index, and attempts a degraded-safe tracker
+close without making Telegram availability part of the orchestration shutdown
+contract. By default it refuses to close while child tasks are still pending or
+unknown, and it also refuses a `success` close while child failures are still
+present. Use `--force true` only for explicit manual recovery.
+
 ## End-To-End Flow
 
 1. Install or refresh the skill with `node scripts/install-openclaw-orchestrator.mjs`.
@@ -112,8 +130,17 @@ chat/topic runtime inputs through the command/spec.
 5. Let the coordinator aggregate child progress and own all `task-status-*` writes.
 6. Close the tracker from the coordinator path when the user-visible task is done.
 
+## Recovery Runbook
+
+1. Inspect active roots with `ocr list-orchestrations --status active`.
+2. Inspect one root with `ocr get-orchestration --task-id <id>`.
+3. If the coordinator died or the plan is terminal, close the root with `ocr close-orchestration --task-id <id> --actor-id <coordinator> --result success|fail`.
+4. If OCR reports `children_incomplete` or `child_failures_present`, inspect first and use `--force true` only for an intentional manual override.
+5. Use `--skip-tracker-close true` only when you explicitly do not want OCR to touch the shared tracker during manual recovery.
+
 ## Current Limits
 
 - `ocr orchestrate-fanout` is a materializer for a ready plan, not a full adaptive planner.
+- Root orchestration limits are intentionally conservative by default: `OPENCLAW_MAX_FANOUT_CHILDREN=8`, `OPENCLAW_MAX_ACTIVE_ORCHESTRATIONS=10`.
 - OCR is production-usable as a coordination backend and coordinator helper, but automatic decomposition/fan-out policy still lives above it in the skill/runtime layer.
 - Telegram degraded modes (`pending`, `unconfirmed`, `suppressed`) are supported, but real bot/topic verification should still be done in the target staging or production environment.

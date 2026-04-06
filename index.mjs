@@ -36,7 +36,12 @@ import { cmdBugReport, cmdBugList, cmdBugFix, cmdBugWontfix, cmdBugAssign, cmdBu
 import { cmdGc } from './commands/gc.mjs';
 import { cmdLifecycleRun, cmdLifecycleStart, cmdLifecycleStop, cmdLifecycleUpdate, cmdLifecycleBeat, cmdLifecycleList } from './commands/lifecycle.mjs';
 import { cmdCostLog, cmdCostReport } from './commands/costs.mjs';
-import { cmdOrchestrateFanout } from './commands/orchestrator.mjs';
+import {
+  cmdOrchestrateFanout,
+  cmdGetOrchestration,
+  cmdListOrchestrations,
+  cmdCloseOrchestration,
+} from './commands/orchestrator.mjs';
 
 // ─── Command Registry ────────────────────────────────────────────────────────
 
@@ -103,6 +108,9 @@ const COMMANDS = {
   'cost-log':              (a) => cmdCostLog(a),
   'cost-report':           (a) => cmdCostReport(a),
   'orchestrate-fanout':    (a) => cmdOrchestrateFanout(a),
+  'get-orchestration':     (a) => cmdGetOrchestration(a),
+  'list-orchestrations':   (a) => cmdListOrchestrations(a),
+  'close-orchestration':   (a) => cmdCloseOrchestration(a),
 
   // Agent Lifecycle (automated heartbeat + status management):
   'lifecycle': async (a) => {
@@ -229,6 +237,9 @@ function printHelp() {
     'Coordinator Runtime:',
     '  orchestrate-fanout --spec <json>             — coordinator-owned fan-out into parallel child tasks',
     '  orchestrate-fanout --goal <text> --agents coder,tester --coordinator-id <id> [--title <text>] [--topic-id <id>] [--chat-id <id>] [--create-tracker true|false]',
+    '  get-orchestration --task-id <id>              — inspect root orchestration, tracker, child results, and child statuses',
+    '  list-orchestrations [--status active|completed|failed|all] [--limit N]  — operator view of orchestration roots',
+    '  close-orchestration --task-id <id> --actor-id <id> [--result success|fail] [--summary <text>] [--force true] [--skip-tracker-close true]',
     '',
     'Pipelines (multi-step orchestration):',
     '  start-pipeline --task-id <id> --template <name> [--context <json>] [--topic-id <id>] [--chat-id <id>] [--coordinator-id <id>]',

@@ -862,6 +862,131 @@ export async function cmdTaskStatusUpdate(args) {
   });
 }
 
+function allowedTaskStatusClosers(taskData = {}) {
+  return new Set(
+    [taskData.coordinator_id, taskData.owner_id, taskData.close_owner_id]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  );
+}
+
+export async function closeTaskStatusTracker(taskId, input = {}) {
+  const normalizedTaskId = String(taskId || '').trim();
+  const actorId = String(input.actor_id || input.actorId || '').trim();
+  const force = input.force === true || input.force === 'true';
+  const projectionOptional = input.projection_optional === true || input.projection_optional === 'true';
+  const closeResult = String(input.result || 'success').trim() === 'fail' ? 'fail' : 'success';
+
+  if (!normalizedTaskId) {
+    return { ok: false, error: 'missing_task_id' };
+  }
+  if (!actorId) {
+    return { ok: false, error: 'missing_actor_id' };
+  }
+
+  const taskData = getTaskData(normalizedTaskId);
+  if (!taskData.message_id) {
+    return { ok: false, error: 'task_not_found', task_id: normalizedTaskId };
+  }
+
+  const allowed = allowedTaskStatusClosers(taskData);
+  const hasStrictOwnership = allowed.size > 0;
+  const actorAllowed = allowed.has(actorId);
+  if (hasStrictOwnership && !actorAllowed) {
+    return { ok: false, error: 'not_closer', task_id: normalizedTaskId, allowed: [...allowed] };
+  }
+
+  if (!hasStrictOwnership && force) {
+    // Legacy permissive trackers stay backward-compatible.
+  }
+
+  const agents = parseJson(taskData.agents, []);
+  const agentStatuses = getAgentStatuses(agents);
+  const text = renderTaskStatus(taskData, agentStatuses, closeResult);
+  const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
+
+  let editResult = { ok: false, description: 'projection skipped' };
+  let deliveryState = 'suppressed';
+  let projectionSkipped = false;
+
+  if (!getTelegramToken()) {
+    if (!projectionOptional) {
+      return {
+        ok: false,
+        closed: false,
+        tg_ok: false,
+        error: 'telegram_token_missing',
+        description: 'OPENCLAW_TELEGRAM_BOT_TOKEN not set',
+      };
+    }
+    editResult = { ok: false, description: 'projection skipped: OPENCLAW_TELEGRAM_BOT_TOKEN not set' };
+    projectionSkipped = true;
+  } else if (!chatId) {
+    if (!projectionOptional) {
+      return {
+        ok: false,
+        closed: false,
+        tg_ok: false,
+        error: 'missing_chat_id',
+        description: 'task-status-close requires tracker chat_id or OPENCLAW_TELEGRAM_CHAT_ID',
+      };
+    }
+    editResult = { ok: false, description: 'projection skipped: missing_chat_id' };
+    projectionSkipped = true;
+  } else {
+    const editBody = {
+      chat_id: chatId,
+      message_id: parseInt(taskData.message_id, 10),
+      text,
+      parse_mode: 'HTML',
+    };
+    editResult = await tgApiSafe('editMessageText', editBody);
+    deliveryState = editResult.ok || editResult.description?.includes('message is not modified')
+      ? 'confirmed'
+      : classifyTelegramFailure(editResult);
+  }
+
+  const closedAt = new Date().toISOString();
+  const persistedTaskData = {
+    ...taskData,
+    status: closeResult === 'fail' ? 'failed' : 'completed',
+    closed_at: closedAt,
+    closed_by: actorId,
+    updated_at: closedAt,
+    rendered_signature: taskStatusSignature(text),
+    delivery_state: projectionSkipped ? 'suppressed' : deliveryState,
+    ...((!projectionSkipped && (editResult.ok || editResult.description?.includes('message is not modified')))
+      ? { last_telegram_edit_at: closedAt }
+      : {}),
+  };
+
+  persistTaskStatus(normalizedTaskId, persistedTaskData);
+  redis('EXPIRE', KEYS.taskStatus(normalizedTaskId), '3600'); // short TTL on close (1h)
+
+  try {
+    redis('XADD', KEYS.eventsStream, '*',
+      'type', 'task_status_closed',
+      'timestamp', String(Math.floor(Date.now() / 1000)),
+      'data', JSON.stringify({
+        task_id: normalizedTaskId,
+        run_id: taskData.run_id || normalizedTaskId,
+        result: closeResult,
+        projection_skipped: projectionSkipped,
+      }));
+  } catch { /* non-critical */ }
+
+  return {
+    ok: true,
+    closed: true,
+    task_id: normalizedTaskId,
+    result: closeResult,
+    tg_ok: Boolean(editResult.ok || editResult.description?.includes('message is not modified')),
+    projection_skipped: projectionSkipped,
+    delivery_state: persistedTaskData.delivery_state,
+    task: persistedTaskData,
+  };
+}
+
 /**
  * task-status-close --task-id <id> --result success|fail --actor-id <id>
  */
@@ -874,81 +999,25 @@ export async function cmdTaskStatusClose(args) {
 
   if (!taskId) throw argError('task-status-close requires --task-id');
   if (!actorId) throw argError('task-status-close requires --actor-id');
-  if (!getTelegramToken()) throw argError('OPENCLAW_TELEGRAM_BOT_TOKEN not set');
-
-  const taskData = getTaskData(taskId);
-  if (!taskData.message_id) {
-    output({ ok: false, error: 'task_not_found', task_id: taskId });
-    return;
-  }
-
-  // Strict ownership: only configured closers can close.
-  // Legacy trackers without ownership stay backward-compatible.
-  const allowed = new Set(
-    [taskData.coordinator_id, taskData.owner_id, taskData.close_owner_id]
-      .map(s => String(s || '').trim())
-      .filter(Boolean)
-  );
-  const hasStrictOwnership = allowed.size > 0;
-  const actorAllowed = allowed.has(String(actorId || '').trim());
-
-  if (hasStrictOwnership && !actorAllowed) {
-    output({ ok: false, error: 'not_closer', task_id: taskId, allowed: [...allowed] });
-    process.exitCode = 1;
-    return;
-  }
-
-  if (!hasStrictOwnership && force) {
-    // Legacy fallback: accept --force but preserve original permissive behavior.
-  }
-
-  const agents = parseJson(taskData.agents, []);
-  const agentStatuses = getAgentStatuses(agents);
-  const closeResult = result === 'fail' ? 'fail' : 'success';
-  const text = renderTaskStatus(taskData, agentStatuses, closeResult);
-  const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
-  if (!chatId) {
-    output({
-      ok: false,
-      closed: false,
-      tg_ok: false,
-      error: 'missing_chat_id',
-      description: 'task-status-close requires tracker chat_id or OPENCLAW_TELEGRAM_CHAT_ID',
-    });
-    process.exitCode = 1;
-    return;
-  }
-
-  const editBody = {
-    chat_id: chatId,
-    message_id: parseInt(taskData.message_id, 10),
-    text,
-    parse_mode: 'HTML',
-  };
-
-  const editResult = await tgApiSafe('editMessageText', editBody);
-  const closeDeliveryState = editResult.ok || editResult.description?.includes('message is not modified')
-    ? 'confirmed'
-    : classifyTelegramFailure(editResult);
-
-  persistTaskStatus(taskId, {
-    ...taskData,
-    status: closeResult === 'fail' ? 'failed' : 'completed',
-    closed_at: new Date().toISOString(),
-    closed_by: actorId,
-    updated_at: new Date().toISOString(),
-    rendered_signature: taskStatusSignature(text),
-    delivery_state: closeDeliveryState,
-    ...(editResult.ok ? { last_telegram_edit_at: new Date().toISOString() } : {}),
+  const closeResponse = await closeTaskStatusTracker(taskId, {
+    result,
+    actor_id: actorId,
+    force,
   });
-  redis('EXPIRE', KEYS.taskStatus(taskId), '3600'); // short TTL on close (1h)
 
-  try {
-    redis('XADD', KEYS.eventsStream, '*',
-      'type', 'task_status_closed',
-      'timestamp', String(Math.floor(Date.now() / 1000)),
-      'data', JSON.stringify({ task_id: taskId, run_id: taskData.run_id || taskId, result: closeResult }));
-  } catch { /* non-critical */ }
+  if (!closeResponse.ok) {
+    output(closeResponse);
+    if (closeResponse.error === 'not_closer' || closeResponse.error === 'missing_chat_id' || closeResponse.error === 'telegram_token_missing') {
+      process.exitCode = 1;
+    }
+    return;
+  }
 
-  output({ ok: true, closed: true, result: closeResult, tg_ok: editResult.ok });
+  output({
+    ok: true,
+    closed: true,
+    result: closeResponse.result,
+    tg_ok: closeResponse.tg_ok,
+    delivery_state: closeResponse.delivery_state,
+  });
 }
