@@ -1,0 +1,17 @@
+{
+  "name": "@openclaw/ocr",
+  "version": "1.0.0",
+  "description": "OpenClaw-Redis CLI for multi-agent coordination",
+  "type": "module",
+  "bin": {
+    "ocr": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "status-watchdog.mjs",
+    "task-status-watcher.mjs",
+    "lifecycle-daemon.mjs",
+    "commands/",
+    "lib/"
+  ]
+}

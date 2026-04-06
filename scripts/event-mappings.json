@@ -1,0 +1,62 @@
+{
+  "roundtable:synthesized": {
+    "agent": "writer",
+    "cooldown_sec": 300,
+    "message_template": "Roundtable {rt_id} завершён. Прочитай blackboard через `ocr roundtable-read {rt_id}` и напиши красивый структурированный синтез в /root/.openclaw/workspace/roundtable/"
+  },
+  "git:commit": {
+    "agent": "reviewer",
+    "cooldown_sec": 1800,
+    "message_template": "Новые коммиты в {repo}. Сделай code review: `cd /root/repos/{repo} && git log --oneline -5`"
+  },
+  "monitor:alert": {
+    "agent": "devops",
+    "cooldown_sec": 600,
+    "message_template": "Алерт мониторинга: {text}"
+  },
+  "monitor:trend": {
+    "agent": "planner",
+    "cooldown_sec": 3600,
+    "message_template": "Тренд от monitor: {text}"
+  },
+  "pipeline_started": {
+    "agent": "nerey",
+    "cooldown_sec": 10,
+    "message_template": "🔄 Pipeline {template} запущен (id: {pipeline_id}). Первый агент: {first_agent}"
+  },
+  "pipeline_completed": {
+    "agent": "nerey",
+    "cooldown_sec": 10,
+    "message_template": "✅ Pipeline {template} завершён (id: {pipeline_id}). Шагов: {total_steps}"
+  },
+  "pipeline_escalated": {
+    "agent": "nerey",
+    "cooldown_sec": 10,
+    "message_template": "⚠️ Pipeline {pipeline_id} эскалирован: {reason}. Итераций: {loop_iterations}"
+  },
+  "pipeline_step_completed": {
+    "agent": "nerey",
+    "cooldown_sec": 5,
+    "message_template": "➡️ Pipeline {pipeline_id}: {agent} завершил → следующий: {next_agent}"
+  },
+  "feedback_loop_started": {
+    "agent": "nerey",
+    "cooldown_sec": 10,
+    "message_template": "🔁 Feedback loop ({type}) запущен: {initiator} ↔ {target}"
+  },
+  "feedback_loop_completed": {
+    "agent": "nerey",
+    "cooldown_sec": 10,
+    "message_template": "✅ Feedback loop ({type}) завершён: PASS на итерации {iteration}"
+  },
+  "feedback_loop_escalated": {
+    "agent": "nerey",
+    "cooldown_sec": 10,
+    "message_template": "⚠️ Feedback loop ({type}) эскалирован: {reason}"
+  },
+  "feedback_loop_iteration": {
+    "agent": "nerey",
+    "cooldown_sec": 5,
+    "message_template": "🔁 Loop {loop_id}: итерация {iteration}, следующий: {next_agent}"
+  }
+}
