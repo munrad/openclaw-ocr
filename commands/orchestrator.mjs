@@ -262,6 +262,7 @@ function scanTaskStatusIds() {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
+    .filter((key) => key !== KEYS.taskStatusActive)
     .map((key) => key.replace(/^openclaw:task-status:/, ''));
 }
 

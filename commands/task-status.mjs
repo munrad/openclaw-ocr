@@ -994,7 +994,7 @@ export async function closeTaskStatusTracker(taskId, input = {}) {
   }
 
   const taskData = getTaskData(normalizedTaskId);
-  if (!taskData.message_id) {
+  if (!taskData || Object.keys(taskData).length === 0) {
     return { ok: false, error: 'task_not_found', task_id: normalizedTaskId };
   }
 
@@ -1018,7 +1018,11 @@ export async function closeTaskStatusTracker(taskId, input = {}) {
   let deliveryState = 'suppressed';
   let projectionSkipped = false;
 
-  if (!getTelegramToken()) {
+  if (!String(taskData.message_id || '').trim()) {
+    editResult = { ok: false, description: 'projection skipped: tracker has no message_id' };
+    projectionSkipped = true;
+    deliveryState = String(taskData.delivery_state || 'suppressed').trim() || 'suppressed';
+  } else if (!getTelegramToken()) {
     if (!projectionOptional) {
       return {
         ok: false,
@@ -1063,7 +1067,9 @@ export async function closeTaskStatusTracker(taskId, input = {}) {
     closed_by: actorId,
     updated_at: closedAt,
     rendered_signature: taskStatusSignature(text),
-    delivery_state: projectionSkipped ? 'suppressed' : deliveryState,
+    delivery_state: projectionSkipped
+      ? (String(taskData.delivery_state || '').trim() || 'suppressed')
+      : deliveryState,
     ...((!projectionSkipped && (editResult.ok || editResult.description?.includes('message is not modified')))
       ? { last_telegram_edit_at: closedAt }
       : {}),

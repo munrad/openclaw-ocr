@@ -128,6 +128,62 @@ test('orchestrate-fanout persists tracker ownership on degraded Telegram deliver
   }
 });
 
+test('close-orchestration closes degraded trackers without message_id', () => {
+  const env = ensureTestTelegramEnv({ ...process.env });
+  const group = `orchestrator-degraded-close-${Date.now()}`;
+  let rootTaskId = null;
+
+  try { redisCli(['XGROUP', 'CREATE', 'openclaw:tasks:stream', group, '$', 'MKSTREAM']); } catch {}
+  try {
+    const created = ocr([
+      'orchestrate-fanout',
+      '--goal', 'Close degraded tracker without Telegram message id',
+      '--agents', 'coder,tester',
+      '--coordinator-id', 'teamlead',
+      '--title', 'Degraded tracker close QA',
+      '--create-tracker', 'true',
+      '--topic-id', '1',
+      '--chat-id', TEST_TELEGRAM_CHAT_ID,
+    ], { env }).json;
+
+    assert.equal(created.ok, true);
+    rootTaskId = created.task_id;
+    assert.equal(created.tracker.ok, false);
+
+    const coderClaim = ocr(['claim-task', 'coder', group]).json;
+    const testerClaim = ocr(['claim-task', 'tester', group]).json;
+    ocr(['complete-task', coderClaim.task_id, '{"agent":"coder","summary":"done"}']);
+    ocr(['complete-task', testerClaim.task_id, '{"agent":"tester","summary":"done"}']);
+
+    const closed = ocr([
+      'close-orchestration',
+      '--task-id', rootTaskId,
+      '--actor-id', 'teamlead',
+      '--result', 'success',
+      '--summary', 'degraded tracker closed locally',
+    ], { env }).json;
+
+    assert.equal(closed.ok, true);
+    assert.equal(closed.tracker_close.ok, true);
+    assert.equal(closed.tracker_close.projection_skipped, true);
+
+    const orchestrationHash = hgetall(`openclaw:orchestration:${rootTaskId}`);
+    assert.equal(orchestrationHash.status, 'completed');
+    assert.equal(orchestrationHash.phase, 'closed');
+
+    const trackerHash = hgetall(`openclaw:task-status:${rootTaskId}`);
+    assert.equal(trackerHash.status, 'completed');
+    assert.equal(trackerHash.closed_by, 'teamlead');
+    assert.equal(trackerHash.delivery_state, 'suppressed');
+    assert.ok(!trackerHash.message_id, 'degraded tracker should remain local-only without message_id');
+  } finally {
+    if (rootTaskId) {
+      try { redisCli(['SREM', 'openclaw:orchestrations:active', rootTaskId]); } catch {}
+    }
+    try { redisCli(['XGROUP', 'DESTROY', 'openclaw:tasks:stream', group]); } catch {}
+  }
+});
+
 test('pipeline and roundtable auto-trackers use explicit coordinator ownership instead of hardcoded nerey', () => {
   const env = ensureTestTelegramEnv({ ...process.env });
 
@@ -611,6 +667,11 @@ test('orchestration-health reports run_id mismatches, forced closes, and degrade
       health.metrics.trackers_delivery_not_confirmed >= baseline.metrics.trackers_delivery_not_confirmed + 1,
       'health metrics must count degraded tracker delivery',
     );
+    assert.equal(
+      health.metrics.trackers_total,
+      baseline.metrics.trackers_total + 1,
+      'health metrics must ignore technical task-status set keys',
+    );
     assert.ok(
       health.metrics.bootstrap_retry_total >= baseline.metrics.bootstrap_retry_total + 2,
       'health metrics must aggregate bootstrap retry history',
@@ -626,6 +687,11 @@ test('orchestration-health reports run_id mismatches, forced closes, and degrade
     assert.equal(degradedTracker.delivery_state, 'unconfirmed');
     assert.equal(degradedTracker.bootstrap_pending, true);
     assert.equal(degradedTracker.bootstrap_retry_count, 2);
+    assert.equal(
+      health.degraded_trackers.some((entry) => !String(entry.task_id || '').trim()),
+      false,
+      'health output must not include technical keys as empty trackers',
+    );
   } finally {
     const cleanupKeys = [
       `openclaw:agents:status:${coder}`,
