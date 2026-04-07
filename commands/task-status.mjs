@@ -690,13 +690,86 @@ export function getAgentStatuses(agentIds, options = {}) {
   return statuses;
 }
 
-function getTaskScopedAgentStatuses(taskData, agentIds, options = {}) {
-  return getAgentStatuses(agentIds, {
+export function inspectTaskScopedAgentStatuses(taskData, agentIds, options = {}) {
+  const expectedRunId = String(taskData?.run_id || options.expected_run_id || options.expectedRunId || '').trim();
+  const includeFallback = options.include_fallback !== false;
+  const statuses = new Map();
+  const issues = [];
+  const summary = {
+    missing_status: 0,
+    missing_run_id: 0,
+    run_id_mismatch: 0,
+    fallback_queued: 0,
+  };
+
+  for (const agentId of uniqueAgents(agentIds)) {
+    const status = getAgentStatus(agentId);
+    if (Object.keys(status).length === 0) {
+      summary.missing_status += 1;
+      if (expectedRunId && includeFallback) {
+        statuses.set(agentId, buildFallbackAgentStatus(agentId, options));
+        summary.fallback_queued += 1;
+      }
+      continue;
+    }
+
+    if (!expectedRunId) {
+      statuses.set(agentId, status);
+      continue;
+    }
+
+    const observedRunId = String(status.run_id || '').trim();
+    if (!observedRunId) {
+      issues.push({
+        agent: agentId,
+        type: 'missing_run_id',
+        expected_run_id: expectedRunId,
+        observed_state: String(status.state || '').trim() || 'unknown',
+        observed_step: String(status.step || status.status || '').trim(),
+      });
+      summary.missing_run_id += 1;
+      if (includeFallback) {
+        statuses.set(agentId, buildFallbackAgentStatus(agentId, options));
+        summary.fallback_queued += 1;
+      }
+      continue;
+    }
+
+    if (observedRunId !== expectedRunId) {
+      issues.push({
+        agent: agentId,
+        type: 'run_id_mismatch',
+        expected_run_id: expectedRunId,
+        observed_run_id: observedRunId,
+        observed_state: String(status.state || '').trim() || 'unknown',
+        observed_step: String(status.step || status.status || '').trim(),
+      });
+      summary.run_id_mismatch += 1;
+      if (includeFallback) {
+        statuses.set(agentId, buildFallbackAgentStatus(agentId, options));
+        summary.fallback_queued += 1;
+      }
+      continue;
+    }
+
+    statuses.set(agentId, status);
+  }
+
+  return {
+    expected_run_id: expectedRunId,
+    statuses,
+    issues,
+    summary,
+  };
+}
+
+export function getTaskScopedAgentStatuses(taskData, agentIds, options = {}) {
+  return inspectTaskScopedAgentStatuses(taskData, agentIds, {
     expected_run_id: taskData?.run_id,
     fallback_state: options.fallback_state || 'queued',
     fallback_step: options.fallback_step || 'queued, awaiting matching run status',
     include_fallback: options.include_fallback,
-  });
+  }).statuses;
 }
 
 // ─── Get Task Data ───────────────────────────────────────────────────────────

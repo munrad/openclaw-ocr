@@ -17,7 +17,7 @@
 import { output } from './lib/errors.mjs';
 
 import { cmdInit, cmdPushTask, cmdClaimTask, cmdCompleteTask, cmdFailTask, cmdListPending } from './commands/tasks.mjs';
-import { cmdSetStatus, cmdGetStatus, cmdHeartbeat } from './commands/agents.mjs';
+import { cmdSetStatus, cmdGetStatus, cmdHeartbeat, cmdStatusHygiene } from './commands/agents.mjs';
 import { cmdLock, cmdUnlock, cmdLockBranch, cmdUnlockBranch, cmdRenewBranchLock, cmdListLocks } from './commands/locks.mjs';
 import { cmdEmit, cmdWatch } from './commands/events.mjs';
 import { cmdQueueMessage, cmdDrainMessages, cmdListMessages } from './commands/mailbox.mjs';
@@ -40,6 +40,7 @@ import {
   cmdOrchestrateFanout,
   cmdGetOrchestration,
   cmdListOrchestrations,
+  cmdOrchestrationHealth,
   cmdCloseOrchestration,
 } from './commands/orchestrator.mjs';
 
@@ -55,6 +56,7 @@ const COMMANDS = {
   'set-status':      (a) => cmdSetStatus(a[0], a[1]),
   'get-status':      (a) => cmdGetStatus(a[0]),
   'heartbeat':       (a) => cmdHeartbeat(a[0]),
+  'status-hygiene':  (a) => cmdStatusHygiene(a),
   'lock':              (a) => cmdLock(a[0], a[1], a[2]),
   'unlock':            (a) => cmdUnlock(a[0], a[1]),
   'lock-branch':       (a) => cmdLockBranch(a[0], a[1], a[2]),
@@ -110,6 +112,7 @@ const COMMANDS = {
   'orchestrate-fanout':    (a) => cmdOrchestrateFanout(a),
   'get-orchestration':     (a) => cmdGetOrchestration(a),
   'list-orchestrations':   (a) => cmdListOrchestrations(a),
+  'orchestration-health':  (a) => cmdOrchestrationHealth(a),
   'close-orchestration':   (a) => cmdCloseOrchestration(a),
 
   // Agent Lifecycle (automated heartbeat + status management):
@@ -175,6 +178,7 @@ function printHelp() {
     '  set-status <agent-id> <json>        — update agent status/progress',
     '  get-status <agent-id>               — get agent status',
     '  heartbeat <agent-id>                — update heartbeat (TTL 60s)',
+    '  status-hygiene [--agents csv] [--apply true]  — report/remove suspicious legacy agent-status fields',
     '',
     'Locks:',
     '  lock <resource> <agent-id> [ttl]    — acquire lock (default TTL 300s)',
@@ -239,6 +243,7 @@ function printHelp() {
     '  orchestrate-fanout --goal <text> --agents coder,tester --coordinator-id <id> [--title <text>] [--topic-id <id>] [--chat-id <id>] [--create-tracker true|false]',
     '  get-orchestration --task-id <id>              — inspect root orchestration, tracker, child results, and child statuses',
     '  list-orchestrations [--status active|completed|failed|all] [--limit N]  — operator view of orchestration roots',
+    '  orchestration-health [--status active|completed|failed|all] [--limit N]  — operator metrics for active roots, tracker delivery, and run_id mismatches',
     '  close-orchestration --task-id <id> --actor-id <id> [--result success|fail] [--summary <text>] [--force true] [--skip-tracker-close true]',
     '',
     'Pipelines (multi-step orchestration):',

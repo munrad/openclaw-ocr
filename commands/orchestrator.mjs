@@ -17,7 +17,7 @@ import {
   createTaskPayload,
   createTaskStatusMessage,
   ensureBootstrappedAgentStatus,
-  getAgentStatuses,
+  inspectTaskScopedAgentStatuses,
   getTaskData,
   closeTaskStatusTracker,
   persistTaskStatus,
@@ -219,6 +219,8 @@ function parseOrchestrationRecord(rawRecord = {}) {
     tracker_close: parseJson(rawRecord.tracker_close, null),
     child_result_summary: parseJson(rawRecord.child_result_summary, null),
     child_status_summary: parseJson(rawRecord.child_status_summary, null),
+    child_status_issue_summary: parseJson(rawRecord.child_status_issue_summary, null),
+    integration_error_count: Number.parseInt(rawRecord.integration_error_count, 10) || 0,
   };
 }
 
@@ -251,6 +253,16 @@ function scanOrchestrationIds() {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((key) => key.replace(/^openclaw:orchestration:/, ''));
+}
+
+function scanTaskStatusIds() {
+  const raw = redisRaw(['--scan', '--pattern', 'openclaw:task-status:*']).trim();
+  if (!raw) return [];
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((key) => key.replace(/^openclaw:task-status:/, ''));
 }
 
 function getTaskResult(taskId) {
@@ -289,7 +301,9 @@ function summarizeAgentStates(agentIds = [], options = {}) {
       .filter((child) => child?.agent)
       .map((child) => [String(child.agent).trim(), child]),
   );
-  const agentStatuses = getAgentStatuses(agentIds, {
+  const scopedStatusReport = inspectTaskScopedAgentStatuses({
+    run_id: options.expected_run_id || options.expectedRunId,
+  }, agentIds, {
     expected_run_id: options.expected_run_id || options.expectedRunId,
     fallback_state: 'queued',
     fallback_step: (agentId) => {
@@ -297,6 +311,7 @@ function summarizeAgentStates(agentIds = [], options = {}) {
       return String(child?.title || 'queued by coordinator').trim() || 'queued by coordinator';
     },
   });
+  const agentStatuses = scopedStatusReport.statuses;
   const summary = {};
   const statuses = agentIds.map((agentId) => {
     const status = agentStatuses.get(agentId) || {};
@@ -304,7 +319,17 @@ function summarizeAgentStates(agentIds = [], options = {}) {
     summary[state] = (summary[state] || 0) + 1;
     return { agent: agentId, ...status };
   });
-  return { statuses, summary };
+  const integrationErrorCount = (
+    Number(scopedStatusReport.summary?.run_id_mismatch || 0)
+    + Number(scopedStatusReport.summary?.missing_run_id || 0)
+  );
+  return {
+    statuses,
+    summary,
+    issues: scopedStatusReport.issues,
+    issue_summary: scopedStatusReport.summary,
+    integration_error_count: integrationErrorCount,
+  };
 }
 
 function parseTrackerRecord(taskData = {}) {
@@ -343,8 +368,26 @@ function buildOrchestrationSnapshot(taskId) {
     child_result_summary: childResults.summary,
     child_statuses: childStatuses.statuses,
     child_status_summary: childStatuses.summary,
+    child_status_issues: childStatuses.issues,
+    child_status_issue_summary: childStatuses.issue_summary,
+    integration_error_count: childStatuses.integration_error_count,
     all_children_terminal: childResults.summary.pending === 0 && childResults.summary.unknown === 0,
     has_failed_children: childResults.summary.failed > 0,
+  };
+}
+
+function buildTrackerHealthSummary(taskData = {}) {
+  const deliveryState = String(taskData.delivery_state || '').trim() || 'unknown';
+  const bootstrapPending = taskData.bootstrap_pending === '1' || taskData.bootstrap_pending === 1;
+  const bootstrapRetryCount = Number.parseInt(taskData.bootstrap_retry_count, 10) || 0;
+  return {
+    task_id: String(taskData.task_id || '').trim(),
+    title: String(taskData.title || '').trim(),
+    status: String(taskData.status || '').trim(),
+    delivery_state: deliveryState,
+    bootstrap_pending: bootstrapPending,
+    bootstrap_retry_count: bootstrapRetryCount,
+    issue_count: (deliveryState !== 'confirmed' ? 1 : 0) + (bootstrapPending ? 1 : 0),
   };
 }
 
@@ -657,27 +700,33 @@ export async function cmdListOrchestrations(args) {
 
   const records = [];
   for (const taskId of candidateIds) {
-    const record = parseOrchestrationRecord(readOrchestrationRecord(taskId));
-    if (!record) continue;
-    if (statusFilter !== 'all' && record.status !== statusFilter) continue;
-    const childSummary = summarizeChildResults(record.created_children).summary;
+    const snapshot = buildOrchestrationSnapshot(taskId);
+    if (!snapshot) continue;
+    if (statusFilter !== 'all' && snapshot.status !== statusFilter) continue;
+    const childSummary = snapshot.child_result_summary || { done: 0, failed: 0, pending: 0, unknown: 0 };
+    const issueSummary = snapshot.child_status_issue_summary || {};
     records.push({
       task_id: taskId,
-      title: record.title,
-      goal: record.goal,
-      status: record.status,
-      phase: record.phase,
-      coordinator_id: record.coordinator_id,
-      owner_id: record.owner_id,
-      child_count: record.child_count,
+      title: snapshot.title,
+      goal: snapshot.goal,
+      status: snapshot.status,
+      phase: snapshot.phase,
+      coordinator_id: snapshot.coordinator_id,
+      owner_id: snapshot.owner_id,
+      child_count: snapshot.child_count,
       done_children: childSummary.done,
       failed_children: childSummary.failed,
       pending_children: childSummary.pending,
       unknown_children: childSummary.unknown,
-      tracker_enabled: record.tracker_enabled,
-      tracker_delivery_state: record.tracker_delivery_state || '',
-      created_at: record.created_at || '',
-      updated_at: record.updated_at || '',
+      run_id_mismatch_children: Number(issueSummary.run_id_mismatch || 0),
+      missing_run_id_children: Number(issueSummary.missing_run_id || 0),
+      integration_error_count: Number(snapshot.integration_error_count || 0),
+      tracker_enabled: snapshot.tracker_enabled,
+      tracker_delivery_state: snapshot.tracker?.delivery_state || snapshot.tracker_delivery_state || '',
+      bootstrap_pending_tracker: snapshot.tracker?.bootstrap_pending === '1' || snapshot.tracker?.bootstrap_pending === 1,
+      forced_close: snapshot.forced_close === '1' || snapshot.forced_close === 1,
+      created_at: snapshot.created_at || '',
+      updated_at: snapshot.updated_at || '',
     });
   }
 
@@ -688,6 +737,105 @@ export async function cmdListOrchestrations(args) {
     status: statusFilter,
     count: Math.min(records.length, limit),
     orchestrations: records.slice(0, limit),
+  });
+}
+
+export async function cmdOrchestrationHealth(args) {
+  const opts = parseArgs(args);
+  const statusFilter = String(opts.status || 'all').trim().toLowerCase();
+  const limit = parsePositiveInteger(opts.limit, 20);
+  const activeIds = pruneActiveOrchestrationsIndex();
+  const orchestrationIds = statusFilter === 'active' ? activeIds : scanOrchestrationIds();
+
+  const metrics = {
+    active_orchestrations: activeIds.length,
+    active_limit: getMaxActiveOrchestrations(),
+    forced_closed_orchestrations: 0,
+    orchestrations_with_integration_errors: 0,
+    child_run_id_mismatches: 0,
+    child_missing_run_id: 0,
+    trackers_total: 0,
+    trackers_bootstrap_pending: 0,
+    trackers_with_retry_history: 0,
+    bootstrap_retry_total: 0,
+    trackers_delivery_not_confirmed: 0,
+    tracker_delivery_states: {},
+  };
+
+  const problematicOrchestrations = [];
+  for (const taskId of orchestrationIds) {
+    const snapshot = buildOrchestrationSnapshot(taskId);
+    if (!snapshot) continue;
+    if (statusFilter !== 'all' && snapshot.status !== statusFilter) continue;
+
+    const issueSummary = snapshot.child_status_issue_summary || {};
+    const runIdMismatchChildren = Number(issueSummary.run_id_mismatch || 0);
+    const missingRunIdChildren = Number(issueSummary.missing_run_id || 0);
+    const integrationErrorCount = Number(snapshot.integration_error_count || 0);
+    const forcedClose = snapshot.forced_close === '1' || snapshot.forced_close === 1;
+
+    metrics.child_run_id_mismatches += runIdMismatchChildren;
+    metrics.child_missing_run_id += missingRunIdChildren;
+    if (integrationErrorCount > 0) metrics.orchestrations_with_integration_errors += 1;
+    if (forcedClose) metrics.forced_closed_orchestrations += 1;
+
+    const trackerHealth = snapshot.tracker ? buildTrackerHealthSummary(snapshot.tracker) : null;
+    if (trackerHealth && (integrationErrorCount > 0 || trackerHealth.issue_count > 0 || forcedClose)) {
+      problematicOrchestrations.push({
+        task_id: snapshot.task_id,
+        title: snapshot.title,
+        status: snapshot.status,
+        phase: snapshot.phase,
+        coordinator_id: snapshot.coordinator_id,
+        integration_error_count: integrationErrorCount,
+        child_status_issue_summary: issueSummary,
+        forced_close: forcedClose,
+        tracker: trackerHealth,
+      });
+      continue;
+    }
+
+    if (integrationErrorCount > 0 || forcedClose) {
+      problematicOrchestrations.push({
+        task_id: snapshot.task_id,
+        title: snapshot.title,
+        status: snapshot.status,
+        phase: snapshot.phase,
+        coordinator_id: snapshot.coordinator_id,
+        integration_error_count: integrationErrorCount,
+        child_status_issue_summary: issueSummary,
+        forced_close: forcedClose,
+      });
+    }
+  }
+
+  const degradedTrackers = [];
+  for (const taskId of scanTaskStatusIds()) {
+    const tracker = parseTrackerRecord(getTaskData(taskId));
+    if (!tracker) continue;
+
+    metrics.trackers_total += 1;
+    const trackerHealth = buildTrackerHealthSummary(tracker);
+    metrics.bootstrap_retry_total += trackerHealth.bootstrap_retry_count;
+    if (trackerHealth.bootstrap_retry_count > 0) metrics.trackers_with_retry_history += 1;
+    if (trackerHealth.bootstrap_pending) metrics.trackers_bootstrap_pending += 1;
+    metrics.tracker_delivery_states[trackerHealth.delivery_state] = (metrics.tracker_delivery_states[trackerHealth.delivery_state] || 0) + 1;
+    if (trackerHealth.delivery_state !== 'confirmed') metrics.trackers_delivery_not_confirmed += 1;
+
+    if (trackerHealth.issue_count > 0) {
+      degradedTrackers.push(trackerHealth);
+    }
+  }
+
+  problematicOrchestrations.sort((left, right) => String(right.task_id || '').localeCompare(String(left.task_id || '')));
+  degradedTrackers.sort((left, right) => String(right.task_id || '').localeCompare(String(left.task_id || '')));
+
+  output({
+    ok: true,
+    status: statusFilter,
+    metrics,
+    problematic_orchestrations: problematicOrchestrations.slice(0, limit),
+    degraded_trackers: degradedTrackers.slice(0, limit),
   });
 }
 
@@ -763,6 +911,8 @@ export async function cmdCloseOrchestration(args) {
     tracker_close: trackerClose,
     child_result_summary: snapshot?.child_result_summary || null,
     child_status_summary: snapshot?.child_status_summary || null,
+    child_status_issue_summary: snapshot?.child_status_issue_summary || null,
+    integration_error_count: snapshot?.integration_error_count || 0,
     updated_at: new Date().toISOString(),
   });
 

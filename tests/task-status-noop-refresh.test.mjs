@@ -56,6 +56,41 @@ function installTelegramNotModifiedMock() {
   };
 }
 
+function installTelegramSuccessCaptureMock(capturedBodies) {
+  const originalRequest = https.request;
+
+  https.request = (options, onResponse) => {
+    let body = '';
+
+    class FakeReq extends EventEmitter {
+      write(chunk) {
+        body += String(chunk);
+      }
+      end() {
+        capturedBodies.push({
+          path: String(options?.path || ''),
+          body,
+        });
+        const res = new EventEmitter();
+        setImmediate(() => {
+          onResponse?.(res);
+          res.emit('data', JSON.stringify({ ok: true, result: { message_id: 123456 } }));
+          res.emit('end');
+        });
+      }
+      destroy(err) {
+        if (err) this.emit('error', err);
+        this.emit('close');
+      }
+    }
+    return new FakeReq();
+  };
+
+  return () => {
+    https.request = originalRequest;
+  };
+}
+
 async function main() {
   const checks = [];
   const cleanupFns = [];
@@ -161,6 +196,55 @@ async function main() {
       assert.equal(output.modified, false);
       assert.equal(output.skipped, true);
       checks.push('task-status-update does not touch updated_at when Telegram reports message is not modified');
+    }
+
+    {
+      const taskId = `run-scope-refresh-${Date.now()}`;
+      const taskKey = `openclaw:task-status:${taskId}`;
+      cleanupFns.push(() => {
+        del(taskKey);
+        try { redisCli(['SREM', 'openclaw:task-status:active', taskId]); } catch {}
+      });
+
+      redisCli(['HSET', taskKey,
+        'task_id', taskId,
+        'run_id', taskId,
+        'title', `Run scope refresh ${taskId}`,
+        'agents', '["coder"]',
+        'topic_id', '72',
+        'chat_id', TEST_TELEGRAM_CHAT_ID,
+        'status', 'running',
+        'message_id', '123457',
+        'coordinator_id', 'teamlead',
+        'owner_id', 'teamlead',
+        'close_owner_id', 'teamlead',
+        'creator_id', 'teamlead',
+        'created_at', '2026-04-05T18:00:00.000Z',
+        'updated_at', '2026-04-05T18:02:00.000Z',
+      ]);
+      redisCli(['SADD', 'openclaw:task-status:active', taskId]);
+      redisCli(['HSET', 'openclaw:agents:status:coder',
+        'state', 'working',
+        'step', 'foreign run payload',
+        'progress', '77',
+        'run_id', 'foreign-run',
+        'updated_at', '2026-04-05T18:02:01.000Z',
+      ]);
+      cleanupFns.push(() => {
+        try { del('openclaw:agents:status:coder'); } catch {}
+      });
+
+      const capturedBodies = [];
+      const restoreHttps = installTelegramSuccessCaptureMock(capturedBodies);
+      cleanupFns.push(restoreHttps);
+
+      await cmdTaskStatusUpdate(['--task-id', taskId, '--force', 'true']);
+      assert.equal(capturedBodies.length, 1, 'task-status-update must attempt one Telegram edit');
+
+      const payload = JSON.parse(capturedBodies[0].body);
+      assert.ok(String(payload.text || '').includes('queued, awaiting matching run status'));
+      assert.ok(!String(payload.text || '').includes('foreign run payload'));
+      checks.push('task-status-update renders queued fallback instead of foreign run_id status');
     }
 
     console.log(JSON.stringify({

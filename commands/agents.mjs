@@ -10,6 +10,38 @@ import { isActiveLike } from '../lib/status-reconcile.mjs';
 import { publishStatusNotify } from '../lib/pubsub.mjs';
 
 const VALID_STATES = ['idle', 'queued', 'spawned', 'starting', 'working', 'blocked', 'waiting', 'reviewing', 'testing', 'completed', 'failed', 'stale'];
+const STATUS_HYGIENE_CANONICAL_FIELDS = new Set([
+  'state',
+  'step',
+  'status',
+  'progress',
+  'updated_at',
+  'run_id',
+  'run_epoch',
+  'reconcile_epoch',
+  'parent_run_id',
+  'bootstrapped_by',
+  'last_degraded_at',
+  'last_degraded_reason',
+  'last_incident_marker',
+  'last_auto_idle_at',
+]);
+
+function parseArgs(args) {
+  const result = {};
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith('--')) continue;
+    const key = arg.slice(2).replace(/-/g, '_');
+    const next = args[i + 1];
+    if (next !== undefined && !String(next).startsWith('--')) {
+      result[key] = args[++i];
+    } else {
+      result[key] = true;
+    }
+  }
+  return result;
+}
 
 function normalizeRunId(value) {
   if (value === undefined || value === null) return '';
@@ -46,6 +78,51 @@ function getStaleResurrectionBlock(agentId, currentStatus, nextStatus) {
     requested_state: nextState,
     required_run_id: currentRunId || null,
     provided_run_id: incomingRunId || null,
+  };
+}
+
+function scanAgentStatusIds() {
+  const raw = redisRaw(['--scan', '--pattern', 'openclaw:agents:status:*']).trim();
+  if (!raw) return [];
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((key) => key.replace(/^openclaw:agents:status:/, ''));
+}
+
+function analyzeAgentStatusHygiene(agentId, status = {}) {
+  const suspiciousFields = [];
+  for (const [field, value] of Object.entries(status)) {
+    const normalizedField = String(field || '').trim();
+    const normalizedValue = String(value || '').trim();
+    if (!normalizedField || STATUS_HYGIENE_CANONICAL_FIELDS.has(normalizedField)) continue;
+
+    if (/^\d{10,}$/.test(normalizedField) && (!normalizedValue || STATUS_HYGIENE_CANONICAL_FIELDS.has(normalizedValue))) {
+      suspiciousFields.push({
+        field: normalizedField,
+        value: normalizedValue,
+        reason: 'numeric_legacy_artifact',
+      });
+      continue;
+    }
+
+    if (
+      STATUS_HYGIENE_CANONICAL_FIELDS.has(normalizedValue)
+      && Object.prototype.hasOwnProperty.call(status, normalizedValue)
+    ) {
+      suspiciousFields.push({
+        field: normalizedField,
+        value: normalizedValue,
+        reason: 'mirrored_legacy_artifact',
+      });
+    }
+  }
+
+  return {
+    agent_id: agentId,
+    suspicious_fields: suspiciousFields,
+    suspicious_field_count: suspiciousFields.length,
   };
 }
 
@@ -159,4 +236,50 @@ export async function cmdHeartbeat(agentId) {
   });
 
   output({ ok: true, agent_id: agentId, ttl: 60 });
+}
+
+export async function cmdStatusHygiene(args) {
+  const opts = parseArgs(args);
+  const apply = opts.apply === true || opts.apply === 'true';
+  const requestedAgents = [
+    ...String(opts.agent || '').split(','),
+    ...String(opts.agents || '').split(','),
+  ].map((agentId) => String(agentId || '').trim()).filter(Boolean);
+
+  const agentIds = requestedAgents.length > 0
+    ? [...new Set(requestedAgents)]
+    : scanAgentStatusIds();
+
+  const findings = [];
+  let suspiciousFieldsTotal = 0;
+  let removedFieldsTotal = 0;
+
+  for (const agentId of agentIds) {
+    const status = parseHgetall(redisRaw(['HGETALL', KEYS.agentStatus(agentId)]));
+    if (!Object.keys(status).length) continue;
+
+    const report = analyzeAgentStatusHygiene(agentId, status);
+    if (report.suspicious_field_count === 0) continue;
+
+    suspiciousFieldsTotal += report.suspicious_field_count;
+    if (apply) {
+      const fieldsToRemove = report.suspicious_fields.map((entry) => entry.field);
+      if (fieldsToRemove.length > 0) {
+        redis('HDEL', KEYS.agentStatus(agentId), ...fieldsToRemove);
+        removedFieldsTotal += fieldsToRemove.length;
+      }
+    }
+
+    findings.push(report);
+  }
+
+  output({
+    ok: true,
+    dry_run: !apply,
+    scanned_agents: agentIds.length,
+    affected_agents: findings.length,
+    suspicious_fields_total: suspiciousFieldsTotal,
+    removed_fields_total: removedFieldsTotal,
+    agents: findings,
+  });
 }

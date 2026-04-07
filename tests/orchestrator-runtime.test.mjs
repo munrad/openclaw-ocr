@@ -307,8 +307,8 @@ test('get-orchestration isolates child statuses to the orchestration run id', ()
     assert.notEqual(testerStatus.step, 'foreign tester work');
   } finally {
     const cleanupKeys = [
-      `openclaw:agent_status:${coder}`,
-      `openclaw:agent_status:${tester}`,
+      `openclaw:agents:status:${coder}`,
+      `openclaw:agents:status:${tester}`,
     ];
     if (rootTaskId) {
       cleanupKeys.push(`openclaw:orchestration:${rootTaskId}`);
@@ -506,4 +506,143 @@ test('close-orchestration closes the root and suppresses tracker projection when
   const trackerHash = hgetall(`openclaw:task-status:${taskId}`);
   assert.equal(trackerHash.status, 'completed');
   assert.equal(trackerHash.delivery_state, 'suppressed');
+});
+
+test('orchestration-health reports run_id mismatches, forced closes, and degraded trackers', () => {
+  const baseline = ocr(['orchestration-health', '--status', 'all', '--limit', '50']).json;
+  const coder = `health-coder-${Date.now()}`;
+  const tester = `health-tester-${Date.now()}`;
+  const trackerTaskId = `health-tracker-${Date.now()}`;
+  const createdAt = new Date().toISOString();
+  let activeRootId = null;
+  let forcedRootId = null;
+  let childTaskIds = [];
+
+  try {
+    const activeRoot = ocr([
+      'orchestrate-fanout',
+      '--goal', 'Health command integration coverage',
+      '--agents', `${coder},${tester}`,
+      '--coordinator-id', 'teamlead',
+      '--title', 'Health integration QA',
+    ]).json;
+    assert.equal(activeRoot.ok, true);
+    activeRootId = activeRoot.task_id;
+    childTaskIds.push(...activeRoot.children.map((child) => child.task_id));
+
+    ocr(['set-status', coder, JSON.stringify({
+      state: 'working',
+      step: 'foreign run work',
+      progress: 40,
+      run_id: 'foreign-run',
+    })]);
+    ocr(['set-status', tester, JSON.stringify({
+      state: 'testing',
+      step: 'missing run id work',
+      progress: 30,
+    })]);
+    redisCli(['HDEL', `openclaw:agents:status:${tester}`, 'run_id']);
+
+    const forcedRoot = ocr([
+      'orchestrate-fanout',
+      '--goal', 'Force close coverage',
+      '--agents', 'coder',
+      '--coordinator-id', 'teamlead',
+      '--title', 'Forced close QA',
+    ]).json;
+    assert.equal(forcedRoot.ok, true);
+    forcedRootId = forcedRoot.task_id;
+    childTaskIds.push(...forcedRoot.children.map((child) => child.task_id));
+
+    const forcedClose = ocr([
+      'close-orchestration',
+      '--task-id', forcedRootId,
+      '--actor-id', 'teamlead',
+      '--result', 'fail',
+      '--summary', 'forced close for health metrics',
+      '--force', 'true',
+    ]).json;
+    assert.equal(forcedClose.ok, true);
+    assert.equal(forcedClose.forced, true);
+
+    persistTaskStatus(trackerTaskId, {
+      ...createTaskPayload(trackerTaskId, {
+        title: 'Degraded tracker QA',
+        agents: ['coder'],
+        chat_id: TEST_TELEGRAM_CHAT_ID,
+        topic_id: '1',
+        run_id: trackerTaskId,
+        coordinator_id: 'teamlead',
+        owner_id: 'teamlead',
+        close_owner_id: 'teamlead',
+        creator_id: 'teamlead',
+      }),
+      created_at: createdAt,
+      updated_at: createdAt,
+      delivery_state: 'unconfirmed',
+      bootstrap_pending: '1',
+      bootstrap_retry_count: '2',
+      message_id: '999',
+    });
+
+    const health = ocr(['orchestration-health', '--status', 'all', '--limit', '50']).json;
+    assert.equal(health.ok, true);
+    assert.ok(
+      health.metrics.child_run_id_mismatches >= baseline.metrics.child_run_id_mismatches + 1,
+      'health metrics must count run_id mismatches',
+    );
+    assert.ok(
+      health.metrics.child_missing_run_id >= baseline.metrics.child_missing_run_id + 1,
+      'health metrics must count missing run_id children',
+    );
+    assert.ok(
+      health.metrics.orchestrations_with_integration_errors >= baseline.metrics.orchestrations_with_integration_errors + 1,
+      'health metrics must count integration-error roots',
+    );
+    assert.ok(
+      health.metrics.forced_closed_orchestrations >= baseline.metrics.forced_closed_orchestrations + 1,
+      'health metrics must count forced closes',
+    );
+    assert.ok(
+      health.metrics.trackers_bootstrap_pending >= baseline.metrics.trackers_bootstrap_pending + 1,
+      'health metrics must count bootstrap_pending trackers',
+    );
+    assert.ok(
+      health.metrics.trackers_delivery_not_confirmed >= baseline.metrics.trackers_delivery_not_confirmed + 1,
+      'health metrics must count degraded tracker delivery',
+    );
+    assert.ok(
+      health.metrics.bootstrap_retry_total >= baseline.metrics.bootstrap_retry_total + 2,
+      'health metrics must aggregate bootstrap retry history',
+    );
+
+    const problematicRoot = health.problematic_orchestrations.find((entry) => entry.task_id === activeRootId);
+    assert.ok(problematicRoot, 'active root with mismatched statuses must be reported');
+    assert.equal(problematicRoot.child_status_issue_summary.run_id_mismatch, 1);
+    assert.equal(problematicRoot.child_status_issue_summary.missing_run_id, 1);
+
+    const degradedTracker = health.degraded_trackers.find((entry) => entry.task_id === trackerTaskId);
+    assert.ok(degradedTracker, 'degraded tracker must be listed');
+    assert.equal(degradedTracker.delivery_state, 'unconfirmed');
+    assert.equal(degradedTracker.bootstrap_pending, true);
+    assert.equal(degradedTracker.bootstrap_retry_count, 2);
+  } finally {
+    const cleanupKeys = [
+      `openclaw:agents:status:${coder}`,
+      `openclaw:agents:status:${tester}`,
+      `openclaw:task-status:${trackerTaskId}`,
+    ];
+    if (activeRootId) {
+      cleanupKeys.push(`openclaw:orchestration:${activeRootId}`);
+      try { redisCli(['SREM', 'openclaw:orchestrations:active', activeRootId]); } catch {}
+    }
+    if (forcedRootId) {
+      cleanupKeys.push(`openclaw:orchestration:${forcedRootId}`);
+      try { redisCli(['SREM', 'openclaw:orchestrations:active', forcedRootId]); } catch {}
+    }
+    for (const childTaskId of childTaskIds) {
+      cleanupKeys.push(`openclaw:task:${childTaskId}`, `openclaw:task:result:${childTaskId}`);
+    }
+    try { redisCli(['DEL', ...cleanupKeys]); } catch {}
+  }
 });

@@ -28,6 +28,7 @@ Use this skill when the main agent is the coordinator and OCR is the backend tra
    `child_run_id`, `parent_run_id`, `acceptance_criteria`, and one narrow responsibility.
 6. Require children to emit only lifecycle/status events:
    `ocr lifecycle ...`, `ocr set-status ...`, `ocr emit ...`.
+   Every child `set-status` update must carry the shared root `run_id`.
 7. Aggregate child progress in the coordinator. Update OCR/Telegram only from the aggregated snapshot.
 8. Close the tracker from the coordinator when the task reaches a terminal result.
 9. When a root orchestration gets stuck, inspect it with `ocr get-orchestration` and close it with `ocr close-orchestration` from the coordinator path.
@@ -37,6 +38,7 @@ Use this skill when the main agent is the coordinator and OCR is the backend tra
 - Keep decomposition, acceptance criteria, and stopping conditions in the coordinator context.
 - Use `ocr orchestrate-fanout` when you want OCR to create the root orchestration record and child tasks in one step.
 - Use `ocr list-orchestrations --status active` and `ocr get-orchestration --task-id <id>` as the operator view for root orchestration recovery.
+- Use `ocr orchestration-health --status all` when you need one operator view for run-id mismatches, forced closes, and degraded tracker delivery.
 - Use `ocr task-status-create/update/close` only from the coordinator path.
 - Treat `ocr start-pipeline` and `ocr roundtable-create` as specialized helpers, not as the default orchestration surface for every task.
 
@@ -55,6 +57,7 @@ Use this skill when the main agent is the coordinator and OCR is the backend tra
 - On backend OCR failure, keep the coordinator state in memory and retry the backend write from the coordinator path only.
 - Respect OCR safety limits: if `orchestrate-fanout` rejects the plan on `OPENCLAW_MAX_FANOUT_CHILDREN` or `OPENCLAW_MAX_ACTIVE_ORCHESTRATIONS`, reduce fan-out or wait for active roots to close.
 - Treat `ocr close-orchestration --force true` as a manual recovery override, not as a normal completion path.
+- If `get-orchestration` or `orchestration-health` reports `run_id_mismatch` / `missing_run_id`, treat that as a child integration bug and fix the child status writes, not as a planner decision.
 
 ## Anti-patterns
 

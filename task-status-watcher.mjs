@@ -25,8 +25,8 @@ import { KEYS } from './lib/schema.mjs';
 import { CONFIG } from './lib/config.mjs';
 import {
   ensureTaskStatusTracker,
-  getAgentStatuses,
   getDefaultTaskStatusChatId,
+  getTaskScopedAgentStatuses,
   getTaskData,
   getTelegramToken,
   persistTaskStatus,
@@ -351,7 +351,7 @@ async function recoverStaleBootstrapPending() {
     log(`bootstrap_pending recovery: retrying TG sendMessage for ${taskId} (attempt ${retryCount + 1}/${BOOTSTRAP_PENDING_MAX_RETRIES}, age ${ageMin.toFixed(1)}min)`);
 
     const agents = parseJson(taskData.agents, []);
-    const agentStatuses = getAgentStatuses(agents);
+    const agentStatuses = getTaskScopedAgentStatuses(taskData, agents);
     const text = renderTaskStatus(taskData, agentStatuses);
     const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
     if (!chatId) {
@@ -414,7 +414,7 @@ async function updateTask(taskId) {
   }
 
   const agents = parseJson(taskData.agents, []);
-  const agentStatuses = getAgentStatuses(agents);
+  const agentStatuses = getTaskScopedAgentStatuses(taskData, agents);
   const text = renderTaskStatus(taskData, agentStatuses);
   const chatId = taskData.chat_id || getDefaultTaskStatusChatId();
   if (!chatId) {

@@ -20,6 +20,7 @@ const DEFAULT_TEST_FILES = [
   'tests/multiagent-spawn-heartbeat.test.mjs',
   'tests/routing-dashboard.test.mjs',
   'tests/routing-status-guards.test.mjs',
+  'tests/status-hygiene.test.mjs',
   'tests/lifecycle-hygiene.test.mjs',
   'tests/lifecycle-remote-stop.test.mjs',
   'tests/orchestrator-runtime.test.mjs',

@@ -115,16 +115,23 @@ Operator surfaces:
 ```bash
 ocr get-orchestration --task-id <root-task-id>
 ocr list-orchestrations --status active
+ocr orchestration-health --status all
+ocr status-hygiene
 ocr close-orchestration --task-id <root-task-id> --actor-id teamlead --result fail --summary "manual recovery close"
 ```
 
 `get-orchestration` returns the root record, tracker snapshot, child task
-results, and child agent statuses. `close-orchestration` finalizes the root
-record, removes it from the active index, and attempts a degraded-safe tracker
-close without making Telegram availability part of the orchestration shutdown
-contract. By default it refuses to close while child tasks are still pending or
-unknown, and it also refuses a `success` close while child failures are still
-present. Use `--force true` only for explicit manual recovery.
+results, child agent statuses, and `child_status_issues` for `run_id`
+mismatches. `orchestration-health` aggregates operator-facing metrics for active
+roots, forced closes, degraded tracker delivery, bootstrap recovery, and child
+status integration errors. `status-hygiene` reports or removes suspicious
+legacy mirrored fields from agent status hashes. `close-orchestration`
+finalizes the root record, removes it from the active index, and attempts a
+degraded-safe tracker close without making Telegram availability part of the
+orchestration shutdown contract. By default it refuses to close while child
+tasks are still pending or unknown, and it also refuses a `success` close while
+child failures are still present. Use `--force true` only for explicit manual
+recovery.
 
 ## End-To-End Flow
 
@@ -132,6 +139,8 @@ present. Use `--force true` only for explicit manual recovery.
 2. Keep the canonical plan and live state in the coordinator skill, not in Redis.
 3. Materialize the fan-out with `ocr orchestrate-fanout` once the decomposition is concrete.
 4. Let child agents write only `ocr lifecycle ...`, `ocr set-status ...`, and `ocr emit ...`.
+   Child `set-status` updates must include the root `run_id`; otherwise OCR
+   intentionally renders a queued fallback and counts it as an integration issue.
 5. Let the coordinator aggregate child progress and own all `task-status-*` writes.
 6. Close the tracker from the coordinator path when the user-visible task is done.
 
@@ -139,9 +148,11 @@ present. Use `--force true` only for explicit manual recovery.
 
 1. Inspect active roots with `ocr list-orchestrations --status active`.
 2. Inspect one root with `ocr get-orchestration --task-id <id>`.
-3. If the coordinator died or the plan is terminal, close the root with `ocr close-orchestration --task-id <id> --actor-id <coordinator> --result success|fail`.
-4. If OCR reports `children_incomplete` or `child_failures_present`, inspect first and use `--force true` only for an intentional manual override.
-5. Use `--skip-tracker-close true` only when you explicitly do not want OCR to touch the shared tracker during manual recovery.
+3. Check aggregate health with `ocr orchestration-health --status all`.
+4. If agent status hashes look corrupt from old mirrored fields, dry-run `ocr status-hygiene` first, then rerun with `--apply true`.
+5. If the coordinator died or the plan is terminal, close the root with `ocr close-orchestration --task-id <id> --actor-id <coordinator> --result success|fail`.
+6. If OCR reports `children_incomplete` or `child_failures_present`, inspect first and use `--force true` only for an intentional manual override.
+7. Use `--skip-tracker-close true` only when you explicitly do not want OCR to touch the shared tracker during manual recovery.
 
 ## Current Limits
 
